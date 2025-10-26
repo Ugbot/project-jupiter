@@ -58,3 +58,6 @@ build-*/
 out/
 bin/
 lib/
+
+# CodeQL
+_codeql_detected_source_root
