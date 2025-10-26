@@ -15,7 +15,7 @@ void shutdown() {
 
 void update(float deltaTime) {
     // Update animations here
-    // std::cout << "Animation update, deltaTime: " << deltaTime << std::endl;
+    (void)deltaTime; // Placeholder implementation
 }
 
 } // namespace animation

@@ -15,7 +15,7 @@ void shutdown() {
 
 void simulate(float deltaTime) {
     // Simulate physics here
-    // std::cout << "Physics simulation step, deltaTime: " << deltaTime << std::endl;
+    (void)deltaTime; // Placeholder implementation
 }
 
 } // namespace physics
