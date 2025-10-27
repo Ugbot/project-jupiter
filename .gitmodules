@@ -1,0 +1,9 @@
+[submodule "vendored/vulkan"]
+	path = vendored/vulkan
+	url = https://github.com/SaschaWillems/Vulkan
+[submodule "vendored/hellovulkan"]
+	path = vendored/hellovulkan
+	url = https://github.com/azer89/HelloVulkan
+[submodule "vendored/glfw"]
+	path = vendored/glfw
+	url = https://github.com/glfw/glfw
