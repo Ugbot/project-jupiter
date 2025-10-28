@@ -7,3 +7,6 @@
 [submodule "vendored/glfw"]
 	path = vendored/glfw
 	url = https://github.com/glfw/glfw
+[submodule "vendored/vkDOOM3"]
+	path = vendored/vkDOOM3
+	url = https://github.com/DustinHLand/vkDOOM3
