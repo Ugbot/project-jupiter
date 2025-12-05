@@ -8,6 +8,12 @@ target_include_directories(input
         $<INSTALL_INTERFACE:include>
 )
 
+# Link SDL3 for input handling
+target_link_libraries(input
+    PUBLIC
+        SDL3::SDL3-static
+)
+
 # Set library properties
 set_target_properties(input PROPERTIES
     VERSION ${PROJECT_VERSION}

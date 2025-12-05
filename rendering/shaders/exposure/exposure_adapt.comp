@@ -1,0 +1,60 @@
+#version 450
+/**
+ * @file exposure_adapt.comp
+ * @brief Smoothly adapt current exposure toward target
+ * 
+ * Implements eye adaptation by lerping the current exposure value
+ * toward the target exposure calculated from the histogram.
+ * Different speeds can be used for brightening vs darkening.
+ */
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// Exposure buffer
+layout(set = 0, binding = 0) buffer ExposureBuffer {
+    uint histogram[256];       // Not used in this pass
+    float averageLuminance;    // Current average scene luminance
+    float currentExposure;     // Input/Output: current exposure value
+    float targetExposure;      // Input: target exposure from histogram
+    float _padding;
+} exposure;
+
+// Push constants for adaptation parameters
+layout(push_constant) uniform PushConstants {
+    float deltaTime;           // Time since last frame (seconds)
+    float adaptSpeedUp;        // Speed when brightening (going from dark to light)
+    float adaptSpeedDown;      // Speed when darkening (going from light to dark)
+    float minExposure;         // Minimum allowed exposure
+    float maxExposure;         // Maximum allowed exposure
+} params;
+
+void main() {
+    // Only one thread needed for this operation
+    if (gl_GlobalInvocationID.x != 0) return;
+
+    float current = exposure.currentExposure;
+    float target = exposure.targetExposure;
+
+    // Choose adaptation speed based on direction
+    // Typically, eyes adapt faster going from light to dark
+    float adaptSpeed;
+    if (target > current) {
+        // Brightening (scene got darker, need more exposure)
+        adaptSpeed = params.adaptSpeedUp;
+    } else {
+        // Darkening (scene got brighter, need less exposure)
+        adaptSpeed = params.adaptSpeedDown;
+    }
+
+    // Exponential interpolation for smooth adaptation
+    // This gives a natural "ease-out" feel
+    float t = 1.0 - exp(-adaptSpeed * params.deltaTime);
+    float newExposure = mix(current, target, t);
+
+    // Clamp to allowed range
+    newExposure = clamp(newExposure, params.minExposure, params.maxExposure);
+
+    // Write back
+    exposure.currentExposure = newExposure;
+}
+

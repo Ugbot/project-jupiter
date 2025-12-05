@@ -1,0 +1,164 @@
+[2025-11-26 12:12:23.592] [INFO] [Legacy] Logging system initialized
+[2025-11-26 12:12:23.592] [INFO] [Main] ========================================
+[2025-11-26 12:12:23.592] [INFO] [Main]   Minimal PBR Demo
+[2025-11-26 12:12:23.592] [INFO] [Main]   Project Jupiter Engine
+[2025-11-26 12:12:23.592] [INFO] [Main] ========================================
+[2025-11-26 12:12:23.592] [INFO] [Application] Starting application: Minimal PBR Demo
+[2025-11-26 12:12:23.592] [INFO] [Application] Initializing SDL
+[2025-11-26 12:12:23.745] [INFO] [Application] Creating window (1280x720)
+[2025-11-26 12:12:23.796] [INFO] [Application] Initializing Vulkan renderer
+[2025-11-26 12:12:23.796] [INFO] [Vulkan] Requesting 6 Vulkan extensions:
+[2025-11-26 12:12:23.796] [INFO] [Vulkan]   - VK_KHR_surface
+[2025-11-26 12:12:23.796] [INFO] [Vulkan]   - VK_EXT_metal_surface
+[2025-11-26 12:12:23.796] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-11-26 12:12:23.796] [INFO] [Vulkan]   - VK_EXT_debug_utils
+[2025-11-26 12:12:23.796] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-11-26 12:12:23.796] [INFO] [Vulkan]   - VK_KHR_get_physical_device_properties2
+[2025-11-26 12:12:23.796] [ERROR] [Vulkan] Failed to create instance (error code: -6)
+[2025-11-26 12:12:23.796] [ERROR] [Vulkan] Failed to create Vulkan instance
+[2025-11-26 12:12:23.796] [ERROR] [Application] Failed to initialize Vulkan renderer
+[2025-11-26 12:12:23.796] [ERROR] [Application] Failed to initialize application
+[2025-11-26 12:12:23.796] [INFO] [Legacy] Logging system shutdown
+[2025-11-26 12:12:46.202] [INFO] [Legacy] Logging system initialized
+[2025-11-26 12:12:46.202] [INFO] [Main] ========================================
+[2025-11-26 12:12:46.202] [INFO] [Main]   Minimal PBR Demo
+[2025-11-26 12:12:46.202] [INFO] [Main]   Project Jupiter Engine
+[2025-11-26 12:12:46.202] [INFO] [Main] ========================================
+[2025-11-26 12:12:46.203] [INFO] [Application] Starting application: Minimal PBR Demo
+[2025-11-26 12:12:46.203] [INFO] [Application] Initializing SDL
+[2025-11-26 12:12:46.319] [INFO] [Application] Creating window (1280x720)
+[2025-11-26 12:12:46.352] [INFO] [Application] Initializing Vulkan renderer
+[2025-11-26 12:12:46.352] [INFO] [Vulkan] Requesting 5 Vulkan extensions:
+[2025-11-26 12:12:46.352] [INFO] [Vulkan]   - VK_KHR_surface
+[2025-11-26 12:12:46.352] [INFO] [Vulkan]   - VK_EXT_metal_surface
+[2025-11-26 12:12:46.352] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-11-26 12:12:46.352] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-11-26 12:12:46.352] [INFO] [Vulkan]   - VK_KHR_get_physical_device_properties2
+[2025-11-26 12:12:46.354] [INFO] [Vulkan] Created Vulkan instance
+[2025-11-26 12:12:46.355] [INFO] [Vulkan] Selected GPU: Apple M3 Pro
+[2025-11-26 12:12:46.355] [INFO] [Vulkan] Enabling VK_KHR_buffer_device_address for GPU pointers
+[2025-11-26 12:12:46.355] [INFO] [Vulkan] Enabling VK_KHR_synchronization2 for modern barriers
+[2025-11-26 12:12:46.355] [INFO] [Vulkan] Enabling VK_EXT_descriptor_indexing for bindless textures
+[2025-11-26 12:12:46.359] [INFO] [Vulkan] Created logical device with modern Vulkan features
+[2025-11-26 12:12:46.359] [INFO] [Vulkan] VMA: Enabling buffer device address support
+[2025-11-26 12:12:46.359] [INFO] [Vulkan] Calling vmaCreateAllocator...
+[2025-11-26 12:12:46.359] [INFO] [Vulkan] Created VMA allocator
+[2025-11-26 12:12:46.359] [INFO] [Vulkan] Vulkan context initialized successfully
+[2025-11-26 12:12:46.360] [INFO] [Vulkan] Created swapchain with 3 images (1280x720)
+[2025-11-26 12:12:46.360] [INFO] [Vulkan] Created depth buffer (1280x720)
+[2025-11-26 12:12:46.360] [INFO] [Vulkan] Loaded pipeline cache from disk (36 bytes)
+[2025-11-26 12:12:46.360] [INFO] [Vulkan] Created pipeline cache
+[2025-11-26 12:12:46.360] [INFO] [Vulkan] Vulkan renderer initialized
+[2025-11-26 12:12:46.360] [INFO] [Application] Application initialized successfully
+[2025-11-26 12:12:46.360] [INFO] [Application] Calling onInit()
+[2025-11-26 12:12:46.361] [INFO] [MinimalPBR] Initializing minimal PBR demo...
+[2025-11-26 12:12:46.361] [INFO] [MinimalPBR] Generated sphere: 2145 vertices, 12288 indices
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x12402e000, size=102960, usage=0x82, memUsage=1
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600001f1c0b0
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600001f1c0b0, memory=0x134508250, size=102960)
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x12402e000, size=102960, usage=0x1, memUsage=2
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600001f1c160
+[2025-11-26 12:12:46.361] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600001f1c160, memory=0x13430da50, size=102960)
+[2025-11-26 12:12:46.375] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x12402e000, size=49152, usage=0x42, memUsage=1
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600001f1c2c0
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600001f1c2c0, memory=0x134508250, size=49152)
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x12402e000, size=49152, usage=0x1, memUsage=2
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600001f1c370
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600001f1c370, memory=0x13430da50, size=49152)
+[2025-11-26 12:12:46.376] [INFO] [MinimalPBR] Created vertex buffer (102960 bytes) and index buffer (49152 bytes)
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x12402e000, size=176, usage=0x10, memUsage=3
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600001f2c6e0
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600001f2c6e0, memory=0x13430da50, size=176)
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x12402e000, size=176, usage=0x10, memUsage=3
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600001f2c790
+[2025-11-26 12:12:46.376] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600001f2c790, memory=0x13430da50, size=176)
+[2025-11-26 12:12:46.376] [INFO] [MinimalPBR] Created descriptor resources
+[2025-11-26 12:12:46.376] [ERROR] [Vulkan] Failed to find shader file: shaders/pbr.vert.spv
+[2025-11-26 12:12:46.376] [ERROR] [Vulkan] Failed to load vertex shader: shaders/pbr.vert.spv
+[2025-11-26 12:12:46.376] [ERROR] [MinimalPBR] Failed to create PBR pipeline
+[2025-11-26 12:12:46.376] [ERROR] [MinimalPBR] Failed to create PBR pipeline
+[2025-11-26 12:12:46.376] [INFO] [Application] Entering main loop
+[2025-11-26 12:15:34.540] [INFO] [Legacy] Logging system initialized
+[2025-11-26 12:15:34.540] [INFO] [Main] ========================================
+[2025-11-26 12:15:34.540] [INFO] [Main]   Minimal PBR Demo
+[2025-11-26 12:15:34.540] [INFO] [Main]   Project Jupiter Engine
+[2025-11-26 12:15:34.540] [INFO] [Main] ========================================
+[2025-11-26 12:15:34.540] [INFO] [Application] Starting application: Minimal PBR Demo
+[2025-11-26 12:15:34.540] [INFO] [Application] Initializing SDL
+[2025-11-26 12:15:34.677] [INFO] [Application] Creating window (1280x720)
+[2025-11-26 12:15:34.721] [INFO] [Application] Initializing Vulkan renderer
+[2025-11-26 12:15:34.721] [INFO] [Vulkan] Requesting 5 Vulkan extensions:
+[2025-11-26 12:15:34.721] [INFO] [Vulkan]   - VK_KHR_surface
+[2025-11-26 12:15:34.721] [INFO] [Vulkan]   - VK_EXT_metal_surface
+[2025-11-26 12:15:34.721] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-11-26 12:15:34.721] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-11-26 12:15:34.721] [INFO] [Vulkan]   - VK_KHR_get_physical_device_properties2
+[2025-11-26 12:15:34.724] [INFO] [Vulkan] Created Vulkan instance
+[2025-11-26 12:15:34.726] [INFO] [Vulkan] Selected GPU: Apple M3 Pro
+[2025-11-26 12:15:34.726] [INFO] [Vulkan] Enabling VK_KHR_buffer_device_address for GPU pointers
+[2025-11-26 12:15:34.726] [INFO] [Vulkan] Enabling VK_KHR_synchronization2 for modern barriers
+[2025-11-26 12:15:34.726] [INFO] [Vulkan] Enabling VK_EXT_descriptor_indexing for bindless textures
+[2025-11-26 12:15:34.730] [INFO] [Vulkan] Created logical device with modern Vulkan features
+[2025-11-26 12:15:34.730] [INFO] [Vulkan] VMA: Enabling buffer device address support
+[2025-11-26 12:15:34.730] [INFO] [Vulkan] Calling vmaCreateAllocator...
+[2025-11-26 12:15:34.730] [INFO] [Vulkan] Created VMA allocator
+[2025-11-26 12:15:34.730] [INFO] [Vulkan] Vulkan context initialized successfully
+[2025-11-26 12:15:34.731] [INFO] [Vulkan] Created swapchain with 3 images (1280x720)
+[2025-11-26 12:15:34.731] [INFO] [Vulkan] Created depth buffer (1280x720)
+[2025-11-26 12:15:34.731] [INFO] [Vulkan] Loaded pipeline cache from disk (36 bytes)
+[2025-11-26 12:15:34.731] [INFO] [Vulkan] Created pipeline cache
+[2025-11-26 12:15:34.731] [INFO] [Vulkan] Vulkan renderer initialized
+[2025-11-26 12:15:34.731] [INFO] [Application] Application initialized successfully
+[2025-11-26 12:15:34.731] [INFO] [Application] Calling onInit()
+[2025-11-26 12:15:34.731] [INFO] [MinimalPBR] Initializing minimal PBR demo...
+[2025-11-26 12:15:34.732] [INFO] [MinimalPBR] Generated sphere: 2145 vertices, 12288 indices
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x14183b600, size=102960, usage=0x82, memUsage=1
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600000268580
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600000268580, memory=0x15580c9d0, size=102960)
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x14183b600, size=102960, usage=0x1, memUsage=2
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x600000268630
+[2025-11-26 12:15:34.732] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x600000268630, memory=0x153715c90, size=102960)
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x14183b600, size=49152, usage=0x42, memUsage=1
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x60000027c210
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x60000027c210, memory=0x15580c9d0, size=49152)
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x14183b600, size=49152, usage=0x1, memUsage=2
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x60000027c370
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x60000027c370, memory=0x153715c90, size=49152)
+[2025-11-26 12:15:34.751] [INFO] [MinimalPBR] Created vertex buffer (102960 bytes) and index buffer (49152 bytes)
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x14183b600, size=176, usage=0x10, memUsage=3
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x60000026c370
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x60000026c370, memory=0x153715c90, size=176)
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Creating VulkanBuffer: allocator=0x14183b600, size=176, usage=0x10, memUsage=3
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] Calling vmaCreateBuffer...
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] vmaCreateBuffer succeeded, buffer=0x60000026c420
+[2025-11-26 12:15:34.751] [INFO] [Vulkan] VulkanBuffer created successfully (buffer=0x60000026c420, memory=0x153715c90, size=176)
+[2025-11-26 12:15:34.752] [INFO] [MinimalPBR] Created descriptor resources
+[2025-11-26 12:15:34.752] [INFO] [Vulkan] Loaded shader: ./bin/shaders/pbr.vert.spv
+[2025-11-26 12:15:34.752] [INFO] [Vulkan] Loaded shader: ./bin/shaders/pbr.frag.spv
+[2025-11-26 12:15:35.107] [INFO] [Vulkan] Created graphics pipeline
+[2025-11-26 12:15:35.108] [INFO] [MinimalPBR] Created PBR pipeline
+[2025-11-26 12:15:35.108] [INFO] [Application] Created perspective camera (FOV: 0.79, aspect: 1.78)
+[2025-11-26 12:15:35.108] [INFO] [Application] Set active camera (type: Perspective)
+[2025-11-26 12:15:35.108] [INFO] [MinimalPBR] Initialization complete!
+[2025-11-26 12:15:35.108] [INFO] [MinimalPBR] Rendering a 5x5 grid of spheres with varying metallic/roughness
+[2025-11-26 12:15:35.108] [INFO] [Application] Entering main loop
+[2025-11-26 12:15:46.555] [INFO] [Application] Calling onShutdown()
+[2025-11-26 12:15:46.555] [INFO] [MinimalPBR] Shutting down...
+[2025-11-26 12:15:46.556] [INFO] [Vulkan] Saved pipeline cache to disk (36 bytes)
+[2025-11-26 12:15:46.557] [INFO] [Vulkan] Vulkan context destroyed
+[2025-11-26 12:15:46.557] [INFO] [Vulkan] Vulkan renderer destroyed
+[2025-11-26 12:15:46.557] [INFO] [Vulkan] Vulkan context destroyed
+[2025-11-26 12:15:46.558] [INFO] [Application] Application shut down
+[2025-11-26 12:15:46.558] [INFO] [Application] Application completed successfully
+[2025-11-26 12:15:46.558] [INFO] [Legacy] Logging system shutdown

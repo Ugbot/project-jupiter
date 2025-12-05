@@ -1,11 +1,19 @@
 add_library(animation
     src/animation.cpp
+    src/skeleton.cpp
+    src/animation_clip.cpp
 )
 
 target_include_directories(animation
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+)
+
+# Add GLM include directory
+target_include_directories(animation
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../vendored/glm
 )
 
 # Set library properties

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(ProjectJupiter 
+project(ProjectJupiter
     VERSION 1.0.0
-    LANGUAGES CXX
+    LANGUAGES C CXX
     DESCRIPTION "Game Engine Framework"
 )
 
@@ -20,6 +20,9 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Vendored third-party dependencies (must be built first)
+add_subdirectory(vendored)
+
 # Add core libraries
 add_subdirectory(platform)
 add_subdirectory(logging)
@@ -27,6 +30,7 @@ add_subdirectory(math)
 add_subdirectory(memory)
 add_subdirectory(utils)
 add_subdirectory(event_system)
+add_subdirectory(ecs)
 
 # Add subsystems
 add_subdirectory(rendering)

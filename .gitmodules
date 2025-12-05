@@ -10,3 +10,12 @@
 [submodule "vendored/vkDOOM3"]
 	path = vendored/vkDOOM3
 	url = https://github.com/DustinHLand/vkDOOM3
+[submodule "vendored/vulkan-gltf-pbr"]
+	path = vendored/vulkan-gltf-pbr
+	url = https://github.com/SaschaWillems/Vulkan-glTF-PBR.git
+[submodule "vendored/oryol-samples"]
+	path = vendored/oryol-samples
+	url = https://github.com/floooh/oryol-samples
+[submodule "vendored/oryol"]
+	path = vendored/oryol
+	url = https://github.com/floooh/oryol

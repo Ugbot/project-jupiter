@@ -1,14 +1,47 @@
-# Build GLFW as static library for windowing
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../vendored/glfw glfw_build)
-
+# Rendering module - Uses SDL3 via platform abstraction layer
 add_library(rendering
     src/rendering.cpp
     src/vulkan_backend.cpp
     src/application.cpp
+    src/lighting.cpp
+    src/texture.cpp
+    src/ibl_resources.cpp
+    src/vulkan_compute_pipeline.cpp
+    # src/gltf_model.cpp  # Deprecated - use assets/gltf_loader.h instead
+    src/vulkan_mesh.cpp
+    src/material.cpp
+    src/material_system.cpp
+    src/scene_manager.cpp
+    src/render_globals.cpp
+    src/default_textures.cpp
+    src/primitives.cpp
+    # Clustered forward rendering
+    src/resources_clustered.cpp
+    src/pipeline_base.cpp
+    src/pipeline_clustered.cpp
+    # Advanced application with ECS integration
+    src/application_advanced.cpp
+    # Advanced rendering features (shadows, SSAO, tonemap, skybox)
+    src/resources_shadow.cpp
+    src/resources_gbuffer.cpp
+    src/resources_hdr.cpp
+    src/pipeline_shadow.cpp
+    src/pipeline_gbuffer.cpp
+    src/pipeline_ssao.cpp
+    src/pipeline_tonemap.cpp
+    src/pipeline_skybox.cpp
+    src/application_features.cpp
+    # Auto-exposure system
+    src/resources_exposure.cpp
+    src/pipeline_exposure.cpp
+    # ECS-Renderer bridge (Arrow-inspired, decoupled threading)
+    src/ecs_bridge.cpp
+    # GPU-Driven Rendering (Phase 2)
+    src/indirect_draw_buffer.cpp
+    src/pipeline_frustum_culling.cpp
+    # UI System (Phase 3)
+    src/pipeline_imgui.cpp
+    src/pipeline_debug.cpp
 )
 
 target_include_directories(rendering
@@ -20,17 +53,26 @@ target_include_directories(rendering
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external/vulkan>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external/ktx/include>
-        # Include GLFW for windowing
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/glfw/include>
+        # Include VMA (Vulkan Memory Allocator)
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored>
+        # Include stb for image loading
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/stb>
+        # Include TinyGLTF for GLTF loading
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/tinygltf>
+        # Include GLM for math
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/glm>
 )
 
-# Link against platform abstraction for windowing
+# Link against platform abstraction (which provides SDL3 windowing)
 target_link_libraries(rendering
     PUBLIC
-        platform
+        platform    # Provides SDL3 windowing and platform utilities
+        assets      # Asset loading and management (CPU-only)
         math
         logging
-        glfw      # Windowing library
+        jupiter_ecs # ECS with Arrow-style kernels
+        imgui       # Dear ImGui with SDL3+Vulkan backend
+        imguizmo    # ImGuizmo for transform gizmos
 )
 
 # Find Vulkan SDK (with MoltenVK support for macOS)
@@ -112,3 +154,21 @@ target_compile_definitions(rendering
         VULKAN_HPP_NO_SMART_HANDLE
         JUPITER_ENABLE_LOGGING
 )
+
+# Add shader includes (modular GLSL library)
+add_subdirectory(shaders/includes)
+
+# Add IBL shaders compilation
+add_subdirectory(shaders/ibl)
+
+# Add clustered forward shaders compilation
+add_subdirectory(shaders/clustered)
+
+# Add advanced feature shaders compilation (shadow, gbuffer, ssao, tonemap, skybox)
+add_subdirectory(shaders/advanced)
+
+# Add auto-exposure compute shaders compilation
+add_subdirectory(shaders/exposure)
+
+# Add GPU-driven compute shaders (frustum culling, etc.)
+add_subdirectory(shaders/compute)

@@ -1,0 +1,121 @@
+#version 450
+/**
+ * @file histogram_average.comp
+ * @brief Calculate weighted average luminance from histogram
+ * 
+ * Processes the luminance histogram to compute a weighted average,
+ * ignoring outlier pixels (darkest and brightest percentiles).
+ * Outputs target exposure value based on desired middle-gray.
+ */
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Exposure buffer with histogram
+layout(set = 0, binding = 0) buffer ExposureBuffer {
+    uint histogram[256];       // Log luminance histogram
+    float averageLuminance;    // Output: weighted average luminance
+    float currentExposure;     // Input: current exposure (not modified here)
+    float targetExposure;      // Output: target exposure
+    float _padding;
+} exposure;
+
+// Push constants for configuration
+layout(push_constant) uniform PushConstants {
+    float minLogLuminance;      // Minimum log luminance
+    float maxLogLuminance;      // Maximum log luminance
+    float lowPercent;           // Ignore bottom N% (e.g., 0.05 = 5%)
+    float highPercent;          // Ignore top (1-N)% (e.g., 0.95 = ignore top 5%)
+    float targetLuminance;      // Target middle-gray (e.g., 0.18)
+    uint totalPixels;           // Total non-black pixels counted
+    float minExposure;          // Minimum allowed exposure
+    float maxExposure;          // Maximum allowed exposure
+} params;
+
+// Shared memory for reduction
+shared uint localHistogram[256];
+shared uint prefixSum[256];
+shared float weightedSum;
+shared uint validPixelCount;
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    
+    // Load histogram to shared memory
+    localHistogram[tid] = exposure.histogram[tid];
+    barrier();
+
+    // Compute prefix sum (inclusive scan) for percentile calculation
+    // Using simple sequential approach for 256 elements
+    if (tid == 0) {
+        prefixSum[0] = localHistogram[0];
+        for (uint i = 1; i < 256; i++) {
+            prefixSum[i] = prefixSum[i - 1] + localHistogram[i];
+        }
+        
+        // Calculate total valid pixels
+        uint total = prefixSum[255];
+        if (total == 0) {
+            // No valid pixels - use default exposure
+            exposure.averageLuminance = params.targetLuminance;
+            exposure.targetExposure = 1.0;
+            return;
+        }
+        
+        // Calculate thresholds for outlier rejection
+        uint lowThreshold = uint(float(total) * params.lowPercent);
+        uint highThreshold = uint(float(total) * params.highPercent);
+        
+        // Compute weighted average of log luminance, excluding outliers
+        float logLumRange = params.maxLogLuminance - params.minLogLuminance;
+        float sum = 0.0;
+        uint count = 0;
+        
+        for (uint i = 0; i < 256; i++) {
+            uint cumulative = prefixSum[i];
+            uint prevCumulative = (i > 0) ? prefixSum[i - 1] : 0;
+            
+            // Check if this bin is within the valid percentile range
+            if (prevCumulative >= lowThreshold && cumulative <= highThreshold) {
+                // Bin center in log luminance space
+                float binLogLum = params.minLogLuminance + (float(i) + 0.5) / 255.0 * logLumRange;
+                float binCount = float(localHistogram[i]);
+                
+                sum += binLogLum * binCount;
+                count += localHistogram[i];
+            }
+            // Partial inclusion for edge bins
+            else if (prevCumulative < lowThreshold && cumulative > lowThreshold) {
+                // Partial lower bound
+                float fraction = float(cumulative - lowThreshold) / float(localHistogram[i]);
+                float binLogLum = params.minLogLuminance + (float(i) + 0.5) / 255.0 * logLumRange;
+                uint partialCount = uint(fraction * float(localHistogram[i]));
+                sum += binLogLum * float(partialCount);
+                count += partialCount;
+            }
+            else if (prevCumulative < highThreshold && cumulative > highThreshold) {
+                // Partial upper bound
+                float fraction = float(highThreshold - prevCumulative) / float(localHistogram[i]);
+                float binLogLum = params.minLogLuminance + (float(i) + 0.5) / 255.0 * logLumRange;
+                uint partialCount = uint(fraction * float(localHistogram[i]));
+                sum += binLogLum * float(partialCount);
+                count += partialCount;
+            }
+        }
+        
+        // Calculate average log luminance
+        float avgLogLuminance = (count > 0) ? (sum / float(count)) : 0.0;
+        
+        // Convert back to linear luminance
+        float avgLuminance = exp2(avgLogLuminance);
+        exposure.averageLuminance = avgLuminance;
+        
+        // Calculate target exposure to bring average to middle gray
+        // Exposure = targetLuminance / avgLuminance
+        float targetExp = params.targetLuminance / max(avgLuminance, 0.0001);
+        
+        // Clamp to allowed range
+        targetExp = clamp(targetExp, params.minExposure, params.maxExposure);
+        exposure.targetExposure = targetExp;
+    }
+}
+

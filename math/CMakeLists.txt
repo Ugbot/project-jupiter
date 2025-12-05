@@ -6,6 +6,7 @@ target_include_directories(math
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+        ${CMAKE_CURRENT_SOURCE_DIR}/../vendored/glm
 )
 
 # Set library properties

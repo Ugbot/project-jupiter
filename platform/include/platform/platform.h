@@ -496,6 +496,11 @@ public:
     virtual bool shouldClose() const = 0;
 
     /**
+     * @brief Request the window to close
+     */
+    virtual void requestClose() = 0;
+
+    /**
      * @brief Show the window
      */
     virtual void show() = 0;
@@ -504,6 +509,14 @@ public:
      * @brief Hide the window
      */
     virtual void hide() = 0;
+
+    /**
+     * @brief Create a Vulkan surface for this window
+     * @param instance Vulkan instance handle
+     * @param surface Pointer to store the created surface
+     * @return 0 on success, non-zero on failure
+     */
+    virtual int createVulkanSurface(void* instance, void** surface) = 0;
 };
 
 /**

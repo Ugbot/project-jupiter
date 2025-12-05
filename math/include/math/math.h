@@ -15,6 +15,13 @@
 #include <cmath>
 #include <cstdint>
 
+// GLM - OpenGL Mathematics library
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE  // Vulkan uses depth range [0, 1]
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
 namespace jupiter {
 namespace math {
 
@@ -216,68 +223,86 @@ struct MATH_API Vector4 {
     static Vector4 one() { return Vector4(1.0f, 1.0f, 1.0f, 1.0f); }
 };
 
-// Matrix4x4 class (basic implementation)
+// ============================================================================
+// Matrix4x4 - Wrapper around GLM mat4 for proper matrix math
+// ============================================================================
+
+/**
+ * @brief 4x4 matrix using GLM under the hood
+ *
+ * Provides proper, well-tested matrix operations via GLM.
+ * GLM is column-major (like OpenGL/Vulkan), so data layout is optimal.
+ */
 struct MATH_API Matrix4x4 {
-    float m[16];
+    glm::mat4 m;
 
-    Matrix4x4() {
-        // Identity matrix
-        for (int i = 0; i < 16; ++i) {
-            m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
-        }
-    }
+    // Constructors
+    Matrix4x4() : m(1.0f) {}  // Identity matrix
+    Matrix4x4(const glm::mat4& matrix) : m(matrix) {}
+    Matrix4x4(float diagonal) : m(diagonal) {}
 
+    // Access underlying GLM matrix
+    glm::mat4& get() { return m; }
+    const glm::mat4& get() const { return m; }
+
+    // Access raw data (column-major)
+    const float* data() const { return glm::value_ptr(m); }
+    float* data() { return glm::value_ptr(m); }
+
+    // Static factory methods
     static Matrix4x4 identity() {
-        return Matrix4x4();
+        return Matrix4x4(glm::mat4(1.0f));
     }
 
-    static Matrix4x4 translation(const Vector3& translation) {
-        Matrix4x4 result;
-        result.m[12] = translation.x;
-        result.m[13] = translation.y;
-        result.m[14] = translation.z;
-        return result;
+    static Matrix4x4 translation(const Vector3& t) {
+        return Matrix4x4(glm::translate(glm::mat4(1.0f), glm::vec3(t.x, t.y, t.z)));
     }
 
     static Matrix4x4 rotationX(float angle) {
-        Matrix4x4 result;
-        float c = std::cos(angle);
-        float s = std::sin(angle);
-        result.m[5] = c;
-        result.m[6] = -s;
-        result.m[9] = s;
-        result.m[10] = c;
-        return result;
+        return Matrix4x4(glm::rotate(glm::mat4(1.0f), angle, glm::vec3(1.0f, 0.0f, 0.0f)));
     }
 
     static Matrix4x4 rotationY(float angle) {
-        Matrix4x4 result;
-        float c = std::cos(angle);
-        float s = std::sin(angle);
-        result.m[0] = c;
-        result.m[2] = s;
-        result.m[8] = -s;
-        result.m[10] = c;
-        return result;
+        return Matrix4x4(glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 1.0f, 0.0f)));
     }
 
     static Matrix4x4 rotationZ(float angle) {
-        Matrix4x4 result;
-        float c = std::cos(angle);
-        float s = std::sin(angle);
-        result.m[0] = c;
-        result.m[1] = -s;
-        result.m[4] = s;
-        result.m[5] = c;
-        return result;
+        return Matrix4x4(glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 0.0f, 1.0f)));
     }
 
-    static Matrix4x4 scale(const Vector3& scale) {
-        Matrix4x4 result;
-        result.m[0] = scale.x;
-        result.m[5] = scale.y;
-        result.m[10] = scale.z;
-        return result;
+    static Matrix4x4 scale(const Vector3& s) {
+        return Matrix4x4(glm::scale(glm::mat4(1.0f), glm::vec3(s.x, s.y, s.z)));
+    }
+
+    // Matrix multiplication
+    Matrix4x4 operator*(const Matrix4x4& other) const {
+        return Matrix4x4(m * other.m);
+    }
+
+    // Camera view matrix (look-at)
+    static Matrix4x4 lookAt(const Vector3& eye, const Vector3& center, const Vector3& up) {
+        return Matrix4x4(glm::lookAt(
+            glm::vec3(eye.x, eye.y, eye.z),
+            glm::vec3(center.x, center.y, center.z),
+            glm::vec3(up.x, up.y, up.z)
+        ));
+    }
+
+    // Perspective projection matrix (Vulkan-compatible with Y-flip)
+    // Vulkan uses Y-down clip space, so we flip Y to match OpenGL conventions
+    static Matrix4x4 perspective(float fovY, float aspect, float near, float far) {
+        glm::mat4 proj = glm::perspective(fovY, aspect, near, far);
+        // Flip Y for Vulkan coordinate system
+        proj[1][1] *= -1.0f;
+        return Matrix4x4(proj);
+    }
+
+    // Orthographic projection matrix (Vulkan-compatible with Y-flip)
+    static Matrix4x4 orthographic(float left, float right, float bottom, float top, float near, float far) {
+        glm::mat4 proj = glm::ortho(left, right, bottom, top, near, far);
+        // Flip Y for Vulkan coordinate system
+        proj[1][1] *= -1.0f;
+        return Matrix4x4(proj);
     }
 };
 

@@ -1,0 +1,90 @@
+#version 460 core
+
+/**
+ * GPU Frustum Culling Compute Shader
+ * 
+ * Tests object AABBs against view frustum planes and writes
+ * visibility flags to output buffer.
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+struct AABB {
+    vec4 minPoint;  // xyz = min corner
+    vec4 maxPoint;  // xyz = max corner
+};
+
+// ============================================================================
+// Buffers
+// ============================================================================
+
+// Input: Object AABBs
+layout(set = 0, binding = 0) readonly buffer ObjectAABBs {
+    AABB objects[];
+};
+
+// Output: Visibility flags (1 = visible, 0 = culled)
+layout(set = 0, binding = 1) writeonly buffer Visibility {
+    uint visibility[];
+};
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    vec4 frustumPlanes[6];  // Normalized plane equations (nx, ny, nz, d)
+    uint objectCount;
+} pc;
+
+// ============================================================================
+// Frustum Test
+// ============================================================================
+
+/**
+ * Test if AABB is outside a single frustum plane
+ * Returns true if AABB is completely outside (culled)
+ */
+bool isOutsidePlane(vec4 plane, AABB aabb) {
+    // Get the vertex most in the direction of the plane normal
+    vec3 p;
+    p.x = plane.x > 0.0 ? aabb.maxPoint.x : aabb.minPoint.x;
+    p.y = plane.y > 0.0 ? aabb.maxPoint.y : aabb.minPoint.y;
+    p.z = plane.z > 0.0 ? aabb.maxPoint.z : aabb.minPoint.z;
+    
+    // Test if this vertex is behind the plane
+    return dot(plane.xyz, p) + plane.w < 0.0;
+}
+
+/**
+ * Test if AABB is visible (intersects or inside frustum)
+ */
+bool isVisible(AABB aabb) {
+    // Test against all 6 frustum planes
+    for (int i = 0; i < 6; ++i) {
+        if (isOutsidePlane(pc.frustumPlanes[i], aabb)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+void main() {
+    uint objectIndex = gl_GlobalInvocationID.x;
+    
+    if (objectIndex >= pc.objectCount) {
+        return;
+    }
+
+    AABB aabb = objects[objectIndex];
+    visibility[objectIndex] = isVisible(aabb) ? 1u : 0u;
+}
+

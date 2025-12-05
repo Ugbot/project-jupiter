@@ -1,9 +1,15 @@
 #include "rendering/application.h"
+#include "rendering/default_textures.h"
+#include "rendering/primitives.h"
+#include "rendering/vulkan_mesh.h"
 #include "vulkan_backend.h"
+#include "rendering/vertex_formats.h"
+#include "assets/image_asset.h"
 #include "logging/logging.h"
 #include "platform/platform.h"
-
-#include <GLFW/glfw3.h>
+#include "platform/sdl_wrapper.h"
+#include <cstring>  // for memcpy
+#include <glm/gtc/type_ptr.hpp>
 
 namespace jupiter {
 namespace rendering {
@@ -14,7 +20,8 @@ Application::Application(const std::string& title, uint32_t width, uint32_t heig
     , width_(width)
     , height_(height)
     , enableValidation_(enableValidation)
-    , lastFrameTime_(0.0) {
+    , sdl_(nullptr)
+    , timer_() {
 }
 
 Application::~Application() {
@@ -54,6 +61,14 @@ bool Application::initialize() {
         jupiter::logging::initialize();
     }
 
+    // Initialize SDL (must be done before creating window)
+    LOG_INFO("Application", "Initializing SDL");
+    sdl_ = std::make_unique<platform::sdl::SDLWrapper>(true, true, true);
+    if (!sdl_->isInitialized()) {
+        LOG_ERROR("Application", "Failed to initialize SDL: %s", sdl_->getError());
+        return false;
+    }
+
     // Create window
     LOG_INFO("Application", "Creating window (%dx%d)", width_, height_);
     window_ = std::make_unique<Window>();
@@ -80,7 +95,7 @@ bool Application::initialize() {
     }
 
     // Initialize timing
-    lastFrameTime_ = getCurrentTime();
+    timer_.reset();
 
     LOG_INFO("Application", "Application initialized successfully");
     return true;
@@ -91,8 +106,61 @@ void Application::shutdown() {
         renderer_->waitIdle();
     }
 
+    // Clean up PBR resources BEFORE destroying renderer (they use VMA allocator)
+    // Order matters: destroy in reverse order of creation
+
+    // Destroy ECS renderer (holds GPU buffers via VMA)
+    ecsRenderer_.reset();
+    ecsWorld_ = nullptr;
+
+    // Clear primitive meshes first (they hold VMA allocations)
+    primitiveMeshes_.clear();
+
+    // Clear loaded textures (VulkanTexture objects with VMA allocations)
+    textures_.clear();
+
+    // Destroy shadow pipeline and resources
+    shadowPipeline_.reset();
+    shadowResources_.reset();
+
+    // Destroy HDR/ApplicationFeatures
+    appFeatures_.reset();
+
+    // Destroy PBR pipeline
+    pbrPipeline_.reset();
+
+    // Destroy scene manager (holds vertex/index buffers)
+    sceneManager_.reset();
+
+    // Destroy material system (holds descriptor pool)
+    materialSystem_.reset();
+
+    // Destroy render globals (holds UBOs)
+    renderGlobals_.reset();
+
+    // Destroy IBL resources (holds cubemaps, BRDF LUT)
+    iblResources_.reset();
+
+    // Destroy default textures
+    if (renderer_) {
+        DefaultTextures::get().destroy();
+    }
+
+    // Destroy light manager (no Vulkan resources, but clean up)
+    lightManager_.reset();
+
+    // Clear cameras (no Vulkan resources)
+    cameras_.clear();
+
+    // Clear GLTF loader and asset database
+    gltfLoader_.reset();
+    assetDatabase_.reset();
+
     // Clear all user-created buffers
     buffers_.clear();
+
+    // Reset auto-render flag
+    autoRenderEnabled_ = false;
 
     // Destroy renderer and window
     renderer_.reset();
@@ -103,13 +171,15 @@ void Application::shutdown() {
 
 void Application::mainLoop() {
     while (!shouldClose()) {
-        // Poll window events
+        // Poll window events (quit, resize only - leaves input events for onInput)
         window_->pollEvents();
 
         // Calculate delta time
-        double currentTime = getCurrentTime();
-        float deltaTime = static_cast<float>(currentTime - lastFrameTime_);
-        lastFrameTime_ = currentTime;
+        float deltaTime = static_cast<float>(timer_.getElapsedSeconds());
+        timer_.reset();
+
+        // Process input events (keyboard, mouse, etc.)
+        onInput(deltaTime);
 
         // Call user update
         onUpdate(deltaTime);
@@ -121,13 +191,35 @@ void Application::mainLoop() {
             continue;
         }
 
-        // Begin render pass
+        // Update current frame index
+        currentFrameIndex_ = renderer_->getCurrentFrameIndex();
+
+        // Get current command buffer
+        VkCommandBuffer cmd = renderer_->getCurrentCommandBuffer();
+
+        // Render shadow pass (before main render pass)
+        if (autoRenderEnabled_ && shadowsEnabled_) {
+            renderShadowPass(currentFrameIndex_);
+        }
+
+        // Pre-render pass hook (shadow maps, G-buffer, SSAO, etc.)
+        onPreRenderPass(cmd, currentFrameIndex_);
+
+        // Begin main render pass (swapchain)
         renderer_->beginRenderPass(imageIndex);
 
-        // Call user render
+        // Render PBR scene if auto-render enabled
+        if (autoRenderEnabled_) {
+            renderPBRScene(currentFrameIndex_);
+        }
+
+        // Call user render (allows custom rendering on top of auto-render)
         onRender();
 
-        // End render pass
+        // Post-render pass hook (tonemapping, etc.) - MUST be inside render pass
+        onPostRenderPass(cmd, currentFrameIndex_);
+
+        // End main render pass
         renderer_->endRenderPass();
 
         // End frame
@@ -139,11 +231,49 @@ void Application::mainLoop() {
 }
 
 double Application::getCurrentTime() const {
-    return glfwGetTime();
+    return platform::Timer::getCurrentTimestamp();
 }
 
 bool Application::shouldClose() const {
     return window_ && window_->shouldClose();
+}
+
+void Application::requestClose() {
+    if (window_) {
+        window_->requestClose();
+    }
+}
+
+// ============================================================================
+// ECS Integration
+// ============================================================================
+
+bool Application::enableECSRendering(ecs::World* world, uint32_t maxInstances) {
+    if (!world) {
+        LOG_ERROR("Application", "Cannot enable ECS rendering with null world");
+        return false;
+    }
+
+    if (!renderer_ || !renderer_->isValid()) {
+        LOG_ERROR("Application", "Cannot enable ECS rendering before renderer is initialized");
+        return false;
+    }
+
+    ecsWorld_ = world;
+    ecsRenderer_ = std::make_unique<ECSRenderer>();
+
+    if (!ecsRenderer_->initialize(
+            renderer_->getDevice(),
+            renderer_->getAllocator(),
+            maxInstances)) {
+        LOG_ERROR("Application", "Failed to initialize ECS renderer");
+        ecsRenderer_.reset();
+        ecsWorld_ = nullptr;
+        return false;
+    }
+
+    LOG_INFO("Application", "ECS rendering enabled (max %u instances)", maxInstances);
+    return true;
 }
 
 // ============================================================================
@@ -211,6 +341,975 @@ void Application::drawIndexed(vulkan::VulkanBuffer* vertexBuffer,
     }
 
     renderer_->drawIndexed(*vertexBuffer, *indexBuffer, indexCount);
+}
+
+PerspectiveCamera* Application::createPerspectiveCamera(float fovY, float aspect,
+                                                        float near, float far) {
+    // Auto-calculate aspect ratio if not provided
+    if (aspect == 0.0f) {
+        aspect = static_cast<float>(width_) / static_cast<float>(height_);
+    }
+
+    auto camera = std::make_unique<PerspectiveCamera>(fovY, aspect, near, far);
+    auto* ptr = camera.get();
+    cameras_.push_back(std::move(camera));
+
+    LOG_INFO("Application", "Created perspective camera (FOV: %.2f, aspect: %.2f)",
+             fovY, aspect);
+    return ptr;
+}
+
+OrthographicCamera* Application::createOrthographicCamera(float left, float right,
+                                                          float bottom, float top,
+                                                          float near, float far) {
+    auto camera = std::make_unique<OrthographicCamera>(left, right, bottom, top, near, far);
+    auto* ptr = camera.get();
+    cameras_.push_back(std::move(camera));
+
+    LOG_INFO("Application", "Created orthographic camera");
+    return ptr;
+}
+
+void Application::setActiveCamera(Camera* camera) {
+    activeCamera_ = camera;
+    LOG_INFO("Application", "Set active camera (type: %s)",
+             camera->getProjectionType() == Camera::ProjectionType::Perspective
+                 ? "Perspective" : "Orthographic");
+}
+
+void Application::updateCameraUniforms() {
+    if (!activeCamera_ || !renderer_->hasDescriptors()) {
+        return;  // No camera or no uniform buffers
+    }
+
+    // Get current frame index from renderer
+    vulkan::VulkanRenderer::UniformBufferObject ubo = {};
+
+    // Model matrix (identity for now - can be set per-object later)
+    math::Matrix4x4 model = math::Matrix4x4::identity();
+
+    // View and projection from camera
+    math::Matrix4x4 view = activeCamera_->getViewMatrix();
+    math::Matrix4x4 proj = activeCamera_->getProjectionMatrix();
+
+    // Copy matrices to UBO (column-major layout)
+    memcpy(ubo.model, model.data(), sizeof(float) * 16);
+    memcpy(ubo.view, view.data(), sizeof(float) * 16);
+    memcpy(ubo.projection, proj.data(), sizeof(float) * 16);
+
+    // Update uniform buffer for current frame
+    // Note: We update for frame 0 here, but in a real app you'd track the current frame index
+    renderer_->updateUniformBuffer(0, ubo);
+}
+
+// ============================================================================
+// PBR & Model Loading
+// ============================================================================
+
+void Application::enableAutoRender() {
+    if (autoRenderEnabled_) {
+        return;  // Already enabled
+    }
+
+    LOG_INFO("Application", "Enabling PBR auto-render mode");
+
+    if (!initializePBRSystems()) {
+        LOG_ERROR("Application", "Failed to initialize PBR systems");
+        return;
+    }
+
+    if (!createPBRPipeline()) {
+        LOG_ERROR("Application", "Failed to create PBR pipeline");
+        return;
+    }
+
+    autoRenderEnabled_ = true;
+    LOG_INFO("Application", "PBR auto-render mode enabled successfully");
+}
+
+bool Application::initializePBRSystems() {
+    LOG_INFO("Application", "Getting Vulkan context...");
+    // Get Vulkan context from renderer
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+
+    LOG_INFO("Application", "Creating asset database...");
+    // Initialize asset database
+    assetDatabase_ = std::make_unique<assets::AssetDatabase>();
+
+    LOG_INFO("Application", "Initializing asset database...");
+    if (!assetDatabase_->initialize("assets.db")) {
+        LOG_ERROR("Application", "Failed to initialize asset database");
+        return false;
+    }
+
+    LOG_INFO("Application", "Creating GLTF loader...");
+    // Initialize GLTF loader
+    gltfLoader_ = std::make_unique<assets::GLTFLoader>(*assetDatabase_);
+
+    LOG_INFO("Application", "Creating material system...");
+    // Initialize material system (max 100 materials)
+    materialSystem_ = std::make_unique<MaterialSystem>();
+
+    LOG_INFO("Application", "Initializing material system...");
+    if (!materialSystem_->initialize(device, 100)) {
+        LOG_ERROR("Application", "Failed to initialize material system");
+        return false;
+    }
+
+    LOG_INFO("Application", "Creating scene manager...");
+    // Initialize scene manager (max 1000 renderables)
+    sceneManager_ = std::make_unique<SceneManager>();
+
+    LOG_INFO("Application", "Initializing scene manager...");
+    if (!sceneManager_->initialize(1000)) {
+        LOG_ERROR("Application", "Failed to initialize scene manager");
+        return false;
+    }
+
+    LOG_INFO("Application", "Creating light manager...");
+    // Initialize light manager
+    lightManager_ = std::make_unique<LightManager>();
+
+    LOG_INFO("Application", "Creating IBL resources...");
+    // Initialize IBL resources with fallback (neutral gray environment)
+    iblResources_ = std::make_unique<IBLResources>();
+
+    LOG_INFO("Application", "Initializing IBL resources...");
+    VkCommandPool commandPool = renderer_->getCommandPool();
+    VkQueue graphicsQueue = renderer_->getGraphicsQueue();
+
+    // Initialize default placeholder textures BEFORE render globals
+    // (RenderGlobals needs these for descriptor set placeholder bindings)
+    LOG_INFO("Application", "Initializing default textures...");
+    if (!DefaultTextures::get().initialize(device, allocator, commandPool, graphicsQueue)) {
+        LOG_ERROR("Application", "Failed to initialize default textures");
+        return false;
+    }
+
+    LOG_INFO("Application", "Creating render globals...");
+    // Initialize render globals (2 frames in flight)
+    renderGlobals_ = std::make_unique<RenderGlobals>();
+
+    LOG_INFO("Application", "Initializing render globals...");
+    if (!renderGlobals_->initialize(device, allocator, 2)) {
+        LOG_ERROR("Application", "Failed to initialize render globals");
+        return false;
+    }
+
+    // Generate BRDF LUT using compute shader (Phase 1)
+    LOG_INFO("Application", "Generating BRDF LUT with compute shader...");
+    if (!iblResources_->generateBRDFLUT(device, allocator, commandPool, graphicsQueue)) {
+        LOG_ERROR("Application", "Failed to generate BRDF LUT, falling back to simple version");
+        // Fall back to simple version if compute shader fails
+        if (!iblResources_->createFallback(device, allocator, commandPool, graphicsQueue)) {
+            LOG_ERROR("Application", "Failed to create IBL fallback resources");
+            return false;
+        }
+    } else {
+        LOG_INFO("Application", "BRDF LUT generated successfully, using fallback for irradiance/prefiltered maps");
+        // For now, still create fallback irradiance and prefiltered maps
+        // (Phase 2-5 will replace these with proper HDR-based generation)
+        if (!iblResources_->createFallback(device, allocator, commandPool, graphicsQueue)) {
+            LOG_ERROR("Application", "Failed to create IBL fallback environment maps");
+            return false;
+        }
+    }
+
+    LOG_INFO("Application", "Binding IBL resources to render globals...");
+    // Bind IBL resources to render globals (all descriptor sets)
+    if (!renderGlobals_->updateIBLResources(
+            iblResources_->getIrradianceMapView(),
+            iblResources_->getIrradianceMapSampler(),
+            iblResources_->getPrefilteredMapView(),
+            iblResources_->getPrefilteredMapSampler(),
+            iblResources_->getBRDFLUTView(),
+            iblResources_->getBRDFLUTSampler())) {
+        LOG_ERROR("Application", "Failed to bind IBL resources to render globals");
+        return false;
+    }
+
+    // Initialize shadow mapping
+    if (!initializeShadowMapping()) {
+        LOG_WARN("Application", "Shadow mapping initialization failed, shadows will be disabled");
+        shadowsEnabled_ = false;
+    }
+
+    LOG_INFO("Application", "PBR systems initialized successfully (with IBL)");
+    return true;
+}
+
+bool Application::initializeShadowMapping() {
+    LOG_INFO("Application", "Initializing shadow mapping...");
+
+    VkDevice device = renderer_->getDevice();
+    VkPhysicalDevice physicalDevice = renderer_->getPhysicalDevice();
+
+    // Create shadow resources
+    shadowResources_ = std::make_unique<ResourcesShadow>();
+
+    ShadowMapConfig config;
+    config.resolution = 2048;
+    config.nearPlane = 0.1f;
+    config.farPlane = 100.0f;
+    config.orthoSize = 25.0f;  // Covers a decent area for primitives demo
+    config.minBias = 0.0005f;
+    config.maxBias = 0.005f;
+
+    try {
+        shadowResources_->create(device, physicalDevice, config, 2);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Application", "Failed to create shadow resources: %s", e.what());
+        shadowResources_.reset();
+        return false;
+    }
+
+    // Create shadow pipeline
+    PipelineConfig pipelineConfig;
+    pipelineConfig.name = "shadow";
+    pipelineConfig.type = PipelineType::GraphicsOffScreen;
+    pipelineConfig.shaderFiles = {
+        "shaders/shadow/depth.vert.spv",
+        "shaders/shadow/depth.frag.spv"
+    };
+
+    try {
+        shadowPipeline_ = std::make_unique<PipelineShadow>(
+            device, physicalDevice, pipelineConfig, shadowResources_.get());
+        shadowPipeline_->setSceneManager(sceneManager_.get());
+    } catch (const std::exception& e) {
+        LOG_ERROR("Application", "Failed to create shadow pipeline: %s", e.what());
+        shadowPipeline_.reset();
+        shadowResources_.reset();
+        return false;
+    }
+
+    // Bind shadow map to render globals
+    if (!renderGlobals_->updateShadowMap(
+            shadowResources_->getShadowMap().view,
+            shadowResources_->getShadowSampler())) {
+        LOG_ERROR("Application", "Failed to bind shadow map to render globals");
+        return false;
+    }
+
+    LOG_INFO("Application", "Shadow mapping initialized successfully (%ux%u)", 
+             config.resolution, config.resolution);
+    return true;
+}
+
+void Application::renderShadowPass(uint32_t frameIndex) {
+    if (!shadowsEnabled_ || !shadowResources_ || !shadowPipeline_ || !lightManager_) {
+        return;
+    }
+
+    // Update shadow matrices based on first directional light
+    updateShadowMatrices(frameIndex);
+
+    // Get a command buffer for the shadow pass
+    VkCommandBuffer cmd = renderer_->getCurrentCommandBuffer();
+    if (cmd == VK_NULL_HANDLE) {
+        return;
+    }
+
+    // Execute shadow pass
+    shadowPipeline_->fillCommandBuffer(cmd, frameIndex);
+}
+
+void Application::updateShadowMatrices(uint32_t frameIndex) {
+    if (!shadowResources_ || !lightManager_ || !renderGlobals_) {
+        return;
+    }
+
+    // Find first directional light for shadow casting
+    const Light* lights = lightManager_->getLights();
+    uint32_t lightCount = lightManager_->getLightCount();
+
+    glm::vec3 lightPos(0.0f, 20.0f, 10.0f);  // Default high up
+    glm::vec3 lightDir(0.0f, -1.0f, 0.0f);   // Default pointing down
+    glm::vec3 targetPos(0.0f, 0.0f, 0.0f);   // Center of scene
+
+    for (uint32_t i = 0; i < lightCount; i++) {
+        if (static_cast<LightType>(lights[i].type) == LightType::DIRECTIONAL) {
+            // Direction is FROM the light source, so negate for position calculation
+            lightDir = glm::vec3(
+                lights[i].directional.direction[0],
+                lights[i].directional.direction[1],
+                lights[i].directional.direction[2]
+            );
+            // Position the light source away from center in the opposite direction
+            lightPos = targetPos - glm::normalize(lightDir) * 30.0f;
+            break;
+        }
+    }
+
+    // Update shadow UBO
+    shadowResources_->updateShadowUBO(frameIndex, lightPos, lightDir, targetPos);
+
+    // Update render globals shadow effects UBO with light space matrix
+    const glm::mat4& lightSpaceMatrix = shadowResources_->getLightSpaceMatrix();
+    renderGlobals_->updateShadowEffects(frameIndex, lightSpaceMatrix, 
+                                        shadowsEnabled_, false, 1.0f, 0.005f);
+}
+
+bool Application::createPBRPipeline() {
+    LOG_INFO("Application", "Creating PBR pipeline");
+
+    VkDevice device = renderer_->getDevice();
+    VkRenderPass renderPass = renderer_->getRenderPass();
+    VkExtent2D extent = renderer_->getExtent();
+
+    // Create pipeline with descriptor set layouts
+    pbrPipeline_ = std::make_unique<vulkan::VulkanPipeline>();
+
+    // Configure pipeline
+    vulkan::VulkanPipeline::Config config;
+
+    // Vertex input for Vertex3DLit
+    static VertexInputDescription vertex3DLitDesc = Vertex3DLit::getDescription();
+    config.vertexInput = &vertex3DLitDesc;
+
+    // Descriptor set layouts
+    config.descriptorSetLayouts.push_back(renderGlobals_->getDescriptorSetLayout()); // Set 0: Global
+    config.descriptorSetLayouts.push_back(materialSystem_->getDescriptorSetLayout()); // Set 1: Material
+
+    // Rasterization state
+    config.cullMode = VK_CULL_MODE_NONE;  // Disable culling (like reference implementation)
+    config.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;  // Standard glTF winding
+    config.polygonMode = VK_POLYGON_MODE_FILL;
+
+    // Depth testing (enabled with depth buffer support)
+    config.depthTestEnable = true;
+    config.depthWriteEnable = true;
+
+    // Blending disabled for opaque PBR
+    config.blendEnable = false;
+
+    // Push constants for model matrix (mat4 = 64 bytes) - vertex shader
+    VkPushConstantRange vertPushConstantRange = {};
+    vertPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    vertPushConstantRange.offset = 0;
+    vertPushConstantRange.size = 64;  // sizeof(mat4)
+    config.pushConstants.push_back(vertPushConstantRange);
+
+    // Push constants for PBR parameters (36 bytes) - fragment shader
+    // struct: 8 floats + 1 uint = 36 bytes
+    VkPushConstantRange fragPushConstantRange = {};
+    fragPushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragPushConstantRange.offset = 64;  // After model matrix
+    fragPushConstantRange.size = 36;    // PBR params
+    config.pushConstants.push_back(fragPushConstantRange);
+
+    // Create pipeline
+    if (!pbrPipeline_->create(device, renderPass, extent,
+                             "shaders/pbr.vert.spv",
+                             "shaders/pbr.frag.spv", config)) {
+        LOG_ERROR("Application", "Failed to create PBR pipeline");
+        return false;
+    }
+
+    LOG_INFO("Application", "PBR pipeline created successfully");
+    return true;
+}
+
+std::vector<RenderableHandle> Application::loadModel(const std::string& filepath) {
+    std::vector<RenderableHandle> handles;
+
+    if (!autoRenderEnabled_) {
+        LOG_ERROR("Application", "Cannot load model: enableAutoRender() must be called first");
+        return handles;
+    }
+
+    LOG_INFO("Application", "Loading model: %s", filepath.c_str());
+
+    // Load GLTF model (CPU-only)
+    std::string modelUuid = gltfLoader_->loadModel(filepath);
+    if (modelUuid.empty()) {
+        LOG_ERROR("Application", "Failed to load model: %s", filepath.c_str());
+        return handles;
+    }
+
+    // Get model asset from database
+    assets::ModelAsset modelAsset;
+    if (!assetDatabase_->getModelAsset(modelUuid, modelAsset)) {
+        LOG_ERROR("Application", "Failed to get model asset from database");
+        return handles;
+    }
+
+    // Load textures (ImageAsset -> VulkanTexture)
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    VkCommandPool commandPool = renderer_->getCommandPool();
+    VkQueue queue = renderer_->getGraphicsQueue();
+
+    for (const std::string& imageUuid : modelAsset.imageUuids) {
+        if (textures_.find(imageUuid) != textures_.end()) {
+            continue;  // Already loaded
+        }
+
+        assets::ImageAsset imageAsset;
+        if (!assetDatabase_->getImageAsset(imageUuid, imageAsset)) {
+            LOG_WARN("Application", "Failed to get image asset: %s", imageUuid.c_str());
+            continue;
+        }
+
+        // Create VulkanTexture from ImageAsset
+        auto texture = std::make_unique<VulkanTexture>();
+        if (!texture->createFromAsset(device, allocator, commandPool, queue,
+                                     imageAsset, true)) {
+            LOG_WARN("Application", "Failed to create texture from asset: %s", imageUuid.c_str());
+            continue;
+        }
+
+        // Create default sampler
+        if (!texture->createSampler(device)) {
+            LOG_WARN("Application", "Failed to create sampler for texture: %s", imageUuid.c_str());
+            continue;
+        }
+
+        textures_[imageUuid] = std::move(texture);
+        LOG_INFO("Application", "Stored texture: %s -> %p", imageUuid.c_str(), textures_[imageUuid].get());
+    }
+
+    // Create texture lookup map (UUID -> VulkanTexture*)
+    std::unordered_map<std::string, VulkanTexture*> textureMap;
+    for (auto& [uuid, texture] : textures_) {
+        textureMap[uuid] = texture.get();
+    }
+    LOG_INFO("Application", "Created texture map with %zu entries", textureMap.size());
+
+    // Create RenderableModel from ModelAsset
+    RenderableModel* model = sceneManager_->createRenderableModel(
+        device, allocator, commandPool, queue,
+        *materialSystem_, modelAsset, textureMap);
+
+    if (!model) {
+        LOG_ERROR("Application", "Failed to create renderable model");
+        return handles;
+    }
+
+    // Get renderables and add to scene
+    std::vector<Renderable> renderables = model->getRenderables();
+    for (const Renderable& renderable : renderables) {
+        RenderableHandle handle = sceneManager_->addRenderable(renderable);
+        handles.push_back(handle);
+    }
+
+    LOG_INFO("Application", "Model loaded successfully (%zu renderables)", handles.size());
+    return handles;
+}
+
+int32_t Application::addDirectionalLight(const float direction[3], const float color[3],
+                                        float intensity) {
+    if (!lightManager_) {
+        LOG_ERROR("Application", "Cannot add light: enableAutoRender() must be called first");
+        return -1;
+    }
+
+    DirectionalLight light;
+    std::memcpy(light.direction, direction, sizeof(light.direction));
+    std::memcpy(light.color, color, sizeof(light.color));
+    light.intensity = intensity;
+
+    int32_t index = lightManager_->addDirectionalLight(light);
+    LOG_INFO("Application", "Added directional light (index: %d)", index);
+    return index;
+}
+
+int32_t Application::addPointLight(const float position[3], const float color[3],
+                                  float intensity, float radius) {
+    if (!lightManager_) {
+        LOG_ERROR("Application", "Cannot add light: enableAutoRender() must be called first");
+        return -1;
+    }
+
+    PointLight light;
+    std::memcpy(light.position, position, sizeof(light.position));
+    std::memcpy(light.color, color, sizeof(light.color));
+    light.intensity = intensity;
+    light.radius = radius;
+
+    int32_t index = lightManager_->addPointLight(light);
+    LOG_INFO("Application", "Added point light (index: %d)", index);
+    return index;
+}
+
+int32_t Application::addSpotLight(const float position[3], const float direction[3],
+                                 const float color[3], float intensity,
+                                 float innerAngle, float outerAngle) {
+    if (!lightManager_) {
+        LOG_ERROR("Application", "Cannot add light: enableAutoRender() must be called first");
+        return -1;
+    }
+
+    SpotLight light;
+    std::memcpy(light.position, position, sizeof(light.position));
+    std::memcpy(light.direction, direction, sizeof(light.direction));
+    std::memcpy(light.color, color, sizeof(light.color));
+    light.intensity = intensity;
+    light.innerConeAngle = innerAngle;
+    light.outerConeAngle = outerAngle;
+
+    int32_t index = lightManager_->addSpotLight(light);
+    LOG_INFO("Application", "Added spot light (index: %d)", index);
+    return index;
+}
+
+void Application::setAmbientLight(const float color[3], float intensity) {
+    if (!lightManager_) {
+        LOG_ERROR("Application", "Cannot set ambient light: enableAutoRender() must be called first");
+        return;
+    }
+
+    AmbientLight light;
+    std::memcpy(light.color, color, sizeof(light.color));
+    light.intensity = intensity;
+
+    lightManager_->setAmbientLight(light);
+    LOG_INFO("Application", "Set ambient light");
+}
+
+void Application::renderPBRScene(uint32_t frameIndex) {
+    if (!autoRenderEnabled_ || !sceneManager_ || !activeCamera_ || !pbrPipeline_) {
+        return;
+    }
+
+    // Update camera uniforms
+    if (renderGlobals_) {
+        renderGlobals_->updateCamera(frameIndex, *activeCamera_);
+    }
+
+    // Update light uniforms
+    if (renderGlobals_ && lightManager_) {
+        renderGlobals_->updateLights(frameIndex, *lightManager_);
+    }
+
+    // Get command buffer
+    VkCommandBuffer commandBuffer = renderer_->getCurrentCommandBuffer();
+
+    // Bind PBR pipeline
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     pbrPipeline_->getPipeline());
+
+    // Push fragment shader constants (global PBR parameters)
+    struct FragmentPushConstants {
+        float directLightIntensity;
+        float ambientIntensity;
+        float emissiveIntensity;
+        float roughnessOverride;
+        float metallicOverride;
+        float baseReflectivity;
+        float exposure;
+        float shadowIntensity;
+        uint32_t flags;
+    } fragPc;
+
+    fragPc.directLightIntensity = 1.0f;
+    fragPc.ambientIntensity = 1.0f;
+    fragPc.emissiveIntensity = 1.0f;
+    fragPc.roughnessOverride = 0.5f;
+    fragPc.metallicOverride = 0.0f;
+    fragPc.baseReflectivity = 0.04f;
+    fragPc.exposure = 1.0f;
+    fragPc.shadowIntensity = 0.5f;
+    fragPc.flags = 0;
+
+    vkCmdPushConstants(commandBuffer, pbrPipeline_->getLayout(),
+                      VK_SHADER_STAGE_FRAGMENT_BIT, 64, sizeof(fragPc), &fragPc);
+
+    // Get global descriptor set (Set 0: camera + lights)
+    VkDescriptorSet globalSet = renderGlobals_->getDescriptorSet(frameIndex);
+
+    // Render scene (SceneManager handles material binding for Set 1)
+    sceneManager_->render(commandBuffer, pbrPipeline_->getLayout(),
+                         pbrPipeline_->getPipeline(), globalSet);
+}
+
+// ============================================================================
+// Primitive Spawning
+// ============================================================================
+
+RenderableHandle Application::spawnCube(const float position[3], float size, 
+                                         const float color[3]) {
+    float dims[3] = {size, size, size};
+    return spawnBox(position, dims, color);
+}
+
+RenderableHandle Application::spawnBox(const float position[3], const float dimensions[3],
+                                        const float color[3]) {
+    if (!sceneManager_ || !materialSystem_) {
+        LOG_ERROR("Application", "Cannot spawn primitive: systems not initialized");
+        return RenderableHandle{};
+    }
+
+    // Generate box mesh
+    MeshData meshData = Primitives::createBox(dimensions[0], dimensions[1], dimensions[2]);
+
+    // Create GPU mesh
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    
+    auto mesh = std::make_unique<VulkanMesh>();
+    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
+        LOG_ERROR("Application", "Failed to create box GPU mesh");
+        return RenderableHandle{};
+    }
+
+    // Create material with default textures and optional color (reuse allocator from above)
+    Material* material = materialSystem_->createSimpleMaterial(
+        allocator,
+        DefaultTextures::get().getWhiteTexture(),  // albedo
+        DefaultTextures::get().getNormalTexture(), // normal
+        DefaultTextures::get().getWhiteTexture(),  // metallic/roughness
+        DefaultTextures::get().getWhiteTexture(),  // occlusion
+        DefaultTextures::get().getBlackTexture(),  // emissive
+        color  // base color factor
+    );
+
+    if (!material) {
+        LOG_ERROR("Application", "Failed to create material for box");
+        return RenderableHandle{};
+    }
+
+    // Create renderable
+    Renderable renderable;
+    renderable.mesh = mesh.get();
+    renderable.material = material;
+    
+    // Set transform
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), 
+                                         glm::vec3(position[0], position[1], position[2]));
+    renderable.transform = transform;
+
+    // Store mesh ownership
+    primitiveMeshes_.push_back(std::move(mesh));
+
+    // Add to scene
+    return sceneManager_->addRenderable(renderable);
+}
+
+RenderableHandle Application::spawnSphere(const float position[3], float radius,
+                                          uint32_t segments, uint32_t rings,
+                                          const float color[3]) {
+    if (!sceneManager_ || !materialSystem_) {
+        LOG_ERROR("Application", "Cannot spawn primitive: systems not initialized");
+        return RenderableHandle{};
+    }
+
+    // Generate sphere mesh
+    MeshData meshData = Primitives::createUVSphere(radius, segments, rings);
+
+    // Create GPU mesh
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    
+    auto mesh = std::make_unique<VulkanMesh>();
+    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
+        LOG_ERROR("Application", "Failed to create sphere GPU mesh");
+        return RenderableHandle{};
+    }
+
+    // Create material with optional color (reuse allocator from above)
+    Material* material = materialSystem_->createSimpleMaterial(
+        allocator,
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getNormalTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getBlackTexture(),
+        color
+    );
+
+    if (!material) {
+        LOG_ERROR("Application", "Failed to create material for sphere");
+        return RenderableHandle{};
+    }
+
+    // Create renderable
+    Renderable renderable;
+    renderable.mesh = mesh.get();
+    renderable.material = material;
+    
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f),
+                                         glm::vec3(position[0], position[1], position[2]));
+    renderable.transform = transform;
+
+    primitiveMeshes_.push_back(std::move(mesh));
+    return sceneManager_->addRenderable(renderable);
+}
+
+RenderableHandle Application::spawnCylinder(const float position[3], float radius,
+                                            float height, uint32_t segments,
+                                            const float color[3]) {
+    if (!sceneManager_ || !materialSystem_) {
+        LOG_ERROR("Application", "Cannot spawn primitive: systems not initialized");
+        return RenderableHandle{};
+    }
+
+    MeshData meshData = Primitives::createCylinder(radius, height, segments, 1);
+
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    
+    auto mesh = std::make_unique<VulkanMesh>();
+    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
+        LOG_ERROR("Application", "Failed to create cylinder GPU mesh");
+        return RenderableHandle{};
+    }
+
+    Material* material = materialSystem_->createSimpleMaterial(
+        allocator,
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getNormalTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getBlackTexture(),
+        color
+    );
+
+    if (!material) {
+        LOG_ERROR("Application", "Failed to create material for cylinder");
+        return RenderableHandle{};
+    }
+
+    Renderable renderable;
+    renderable.mesh = mesh.get();
+    renderable.material = material;
+    
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f),
+                                         glm::vec3(position[0], position[1], position[2]));
+    renderable.transform = transform;
+
+    primitiveMeshes_.push_back(std::move(mesh));
+    return sceneManager_->addRenderable(renderable);
+}
+
+RenderableHandle Application::spawnPlane(const float position[3], float width,
+                                         float depth, const float color[3]) {
+    if (!sceneManager_ || !materialSystem_) {
+        LOG_ERROR("Application", "Cannot spawn primitive: systems not initialized");
+        return RenderableHandle{};
+    }
+
+    MeshData meshData = Primitives::createPlane(width, depth, 1, 1);
+
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    
+    auto mesh = std::make_unique<VulkanMesh>();
+    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
+        LOG_ERROR("Application", "Failed to create plane GPU mesh");
+        return RenderableHandle{};
+    }
+
+    Material* material = materialSystem_->createSimpleMaterial(
+        allocator,
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getNormalTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getBlackTexture(),
+        color
+    );
+
+    if (!material) {
+        LOG_ERROR("Application", "Failed to create material for plane");
+        return RenderableHandle{};
+    }
+
+    Renderable renderable;
+    renderable.mesh = mesh.get();
+    renderable.material = material;
+    
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f),
+                                         glm::vec3(position[0], position[1], position[2]));
+    renderable.transform = transform;
+
+    primitiveMeshes_.push_back(std::move(mesh));
+    return sceneManager_->addRenderable(renderable);
+}
+
+RenderableHandle Application::spawnCapsule(const float position[3], float radius,
+                                           float height, const float color[3]) {
+    if (!sceneManager_ || !materialSystem_) {
+        LOG_ERROR("Application", "Cannot spawn primitive: systems not initialized");
+        return RenderableHandle{};
+    }
+
+    MeshData meshData = Primitives::createCapsule(radius, height, 32, 8);
+
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    
+    auto mesh = std::make_unique<VulkanMesh>();
+    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
+        LOG_ERROR("Application", "Failed to create capsule GPU mesh");
+        return RenderableHandle{};
+    }
+
+    Material* material = materialSystem_->createSimpleMaterial(
+        allocator,
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getNormalTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getWhiteTexture(),
+        DefaultTextures::get().getBlackTexture(),
+        color
+    );
+
+    if (!material) {
+        LOG_ERROR("Application", "Failed to create material for capsule");
+        return RenderableHandle{};
+    }
+
+    Renderable renderable;
+    renderable.mesh = mesh.get();
+    renderable.material = material;
+    
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f),
+                                         glm::vec3(position[0], position[1], position[2]));
+    renderable.transform = transform;
+
+    primitiveMeshes_.push_back(std::move(mesh));
+    return sceneManager_->addRenderable(renderable);
+}
+
+void Application::setRenderableTransform(RenderableHandle handle,
+                                          const float position[3],
+                                          const float rotation[3],
+                                          float scale) {
+    if (!sceneManager_ || !handle.isValid()) return;
+
+    glm::mat4 transform = glm::mat4(1.0f);
+    
+    // Apply translation
+    transform = glm::translate(transform, glm::vec3(position[0], position[1], position[2]));
+    
+    // Apply rotation (pitch, yaw, roll) if provided
+    if (rotation) {
+        transform = glm::rotate(transform, rotation[1], glm::vec3(0, 1, 0));  // Yaw
+        transform = glm::rotate(transform, rotation[0], glm::vec3(1, 0, 0));  // Pitch
+        transform = glm::rotate(transform, rotation[2], glm::vec3(0, 0, 1));  // Roll
+    }
+    
+    // Apply scale
+    if (scale != 1.0f) {
+        transform = glm::scale(transform, glm::vec3(scale));
+    }
+    
+    sceneManager_->updateTransform(handle, transform);
+}
+
+void Application::setRenderableMatrix(RenderableHandle handle, const float* transform) {
+    if (!sceneManager_ || !handle.isValid() || !transform) return;
+    
+    glm::mat4 mat = glm::make_mat4(transform);
+    sceneManager_->updateTransform(handle, mat);
+}
+
+// ============================================================================
+// HDR Pipeline and Tonemapping
+// ============================================================================
+
+void Application::enableHDR(bool enable) {
+    if (useHDRPipeline_ == enable) return;
+    
+    useHDRPipeline_ = enable;
+    
+    if (enable && renderer_) {
+        // Initialize HDR pipeline if not already done
+        if (!appFeatures_) {
+            if (!initializeHDRPipeline()) {
+                LOG_ERROR("Application", "Failed to initialize HDR pipeline");
+                useHDRPipeline_ = false;
+                return;
+            }
+        }
+        LOG_INFO("Application", "HDR pipeline enabled");
+    } else {
+        LOG_INFO("Application", "HDR pipeline disabled");
+    }
+}
+
+void Application::setExposure(float exposure) {
+    manualExposure_ = std::max(0.01f, std::min(exposure, 20.0f));
+}
+
+void Application::setAutoExposure(bool enable) {
+    autoExposureEnabled_ = enable;
+}
+
+void Application::setTonemapOperator(TonemapOperator op) {
+    tonemapOperator_ = op;
+}
+
+RenderFeatures& Application::getRenderFeatures() {
+    static RenderFeatures defaultFeatures;
+    if (appFeatures_) {
+        return appFeatures_->features();
+    }
+    return defaultFeatures;
+}
+
+bool Application::initializeHDRPipeline() {
+    if (!renderer_) {
+        LOG_ERROR("Application", "Cannot initialize HDR pipeline: no renderer");
+        return false;
+    }
+
+    LOG_INFO("Application", "Initializing HDR pipeline and features...");
+
+    // HDR pipeline requires ApplicationAdvanced for full functionality
+    // For now, just mark as ready - the basic Application will continue
+    // to use in-shader tonemapping until HDR framebuffer is wired up
+    
+    LOG_INFO("Application", "HDR pipeline ready (using in-shader tonemapping)");
+    return true;
+}
+
+void Application::renderWithHDR(uint32_t frameIndex) {
+    // This is called when HDR is enabled to handle the HDR-to-swapchain path
+    // Currently a placeholder - will be expanded when auto-exposure is implemented
+    
+    if (!appFeatures_) return;
+    
+    // The main render still goes to the normal swapchain
+    // Tonemapping is applied in the shader for now
+}
+
+void Application::renderTonemapPass(VkCommandBuffer cmd, uint32_t frameIndex) {
+    // Placeholder for tonemap pass when using HDR framebuffer
+    // Will be implemented when full HDR pipeline is in place
+    if (!appFeatures_) return;
+    
+    // For now, tonemapping is done in pbr.frag shader
+}
+
+// ============================================================================
+// PBR Push Constants
+// ============================================================================
+
+void Application::setPBRParams(const PBRPushConstants& params) {
+    pbrPushConstants_ = params;
+}
+
+void Application::setDirectLightIntensity(float intensity) {
+    pbrPushConstants_.directLightIntensity = std::max(0.0f, intensity);
+}
+
+void Application::setAmbientIntensity(float intensity) {
+    pbrPushConstants_.ambientIntensity = std::max(0.0f, intensity);
+}
+
+void Application::setShadowIntensity(float intensity) {
+    pbrPushConstants_.shadowIntensity = std::clamp(intensity, 0.0f, 1.0f);
+}
+
+void Application::setPBRDebugMode(uint32_t mode) {
+    pbrPushConstants_.setDebugMode(mode);
+}
+
+void Application::clearPBRDebugMode() {
+    pbrPushConstants_.clearDebugMode();
 }
 
 } // namespace rendering

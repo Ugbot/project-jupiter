@@ -1,5 +1,12 @@
+// Define VMA implementation in this translation unit
+#define VMA_IMPLEMENTATION
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+// VMA_DYNAMIC_VULKAN_FUNCTIONS defaults to 1 when STATIC is 0
+
 #include "vulkan_backend.h"
 #include "rendering/rendering.h"
+#include "rendering/vertex_formats.h"
+#include "rendering/descriptor_builder.h"
 #include "logging/logging.h"
 
 #include <fstream>
@@ -16,39 +23,140 @@ namespace vulkan {
 // ============================================================================
 
 VulkanBuffer::VulkanBuffer(VulkanBuffer&& other) noexcept
-    : device_(other.device_)
+    : allocator_(other.allocator_)
+    , device_(other.device_)
     , buffer_(other.buffer_)
     , memory_(other.memory_)
+    , allocation_(other.allocation_)
     , size_(other.size_)
-    , properties_(other.properties_) {
+    , properties_(other.properties_)
+    , usesVMA_(other.usesVMA_)
+    , deviceAddress_(other.deviceAddress_) {
+    other.allocator_ = VK_NULL_HANDLE;
     other.device_ = VK_NULL_HANDLE;
     other.buffer_ = VK_NULL_HANDLE;
     other.memory_ = VK_NULL_HANDLE;
+    other.allocation_ = VK_NULL_HANDLE;
     other.size_ = 0;
+    other.usesVMA_ = false;
+    other.deviceAddress_ = 0;
 }
 
 VulkanBuffer& VulkanBuffer::operator=(VulkanBuffer&& other) noexcept {
     if (this != &other) {
         destroy();
+        allocator_ = other.allocator_;
         device_ = other.device_;
         buffer_ = other.buffer_;
         memory_ = other.memory_;
+        allocation_ = other.allocation_;
         size_ = other.size_;
         properties_ = other.properties_;
+        usesVMA_ = other.usesVMA_;
+        deviceAddress_ = other.deviceAddress_;
+        other.allocator_ = VK_NULL_HANDLE;
         other.device_ = VK_NULL_HANDLE;
         other.buffer_ = VK_NULL_HANDLE;
         other.memory_ = VK_NULL_HANDLE;
+        other.allocation_ = VK_NULL_HANDLE;
         other.size_ = 0;
+        other.usesVMA_ = false;
+        other.deviceAddress_ = 0;
     }
     return *this;
 }
 
+// VMA-based buffer creation (preferred)
+bool VulkanBuffer::create(VmaAllocator allocator, VkDeviceSize size,
+                          VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage,
+                          VmaAllocationCreateFlags flags) {
+    LOG_INFO("Vulkan", "Creating VulkanBuffer: allocator=%p, size=%llu, usage=0x%x, memUsage=%d",
+             allocator, (unsigned long long)size, usage, memoryUsage);
+
+    if (allocator == VK_NULL_HANDLE) {
+        LOG_ERROR("Vulkan", "Invalid VMA allocator (VK_NULL_HANDLE)");
+        return false;
+    }
+
+    if (size == 0) {
+        LOG_ERROR("Vulkan", "Invalid buffer size (0)");
+        return false;
+    }
+
+    allocator_ = allocator;
+    size_ = size;
+    usesVMA_ = true;
+
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocInfo = {};
+    allocInfo.usage = memoryUsage;
+    allocInfo.flags = flags;
+
+    LOG_INFO("Vulkan", "Calling vmaCreateBuffer...");
+    VkResult result = vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer_, &allocation_, nullptr);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create buffer with VMA: allocator=%p, size=%llu, usage=0x%x, result=%d",
+                  allocator, (unsigned long long)size, usage, result);
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "vmaCreateBuffer succeeded, buffer=%p", buffer_);
+
+    // Get the memory handle for backward compatibility
+    VmaAllocationInfo allocationInfo;
+    vmaGetAllocationInfo(allocator, allocation_, &allocationInfo);
+    memory_ = allocationInfo.deviceMemory;
+
+    LOG_INFO("Vulkan", "VulkanBuffer created successfully (buffer=%p, memory=%p, size=%llu)",
+             buffer_, memory_, (unsigned long long)size);
+    return true;
+}
+
+// VMA-based buffer creation with device address support (for bindless/raytracing)
+bool VulkanBuffer::createWithDeviceAddress(VkDevice device, VmaAllocator allocator,
+                                           VkDeviceSize size, VkBufferUsageFlags usage,
+                                           VmaMemoryUsage memoryUsage,
+                                           VmaAllocationCreateFlags flags) {
+    // Ensure shader device address bit is set
+    usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    // Create the buffer using VMA
+    if (!create(allocator, size, usage, memoryUsage, flags)) {
+        return false;
+    }
+
+    // Store device handle for address query
+    device_ = device;
+
+    // Query the buffer's device address
+    VkBufferDeviceAddressInfo addressInfo = {};
+    addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    addressInfo.buffer = buffer_;
+    deviceAddress_ = vkGetBufferDeviceAddress(device, &addressInfo);
+
+    if (deviceAddress_ == 0) {
+        LOG_ERROR("Vulkan", "Failed to get buffer device address");
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "VulkanBuffer created with device address: 0x%llx",
+             (unsigned long long)deviceAddress_);
+    return true;
+}
+
+// Legacy buffer creation (for backward compatibility)
 bool VulkanBuffer::create(VkDevice device, VkPhysicalDevice physicalDevice,
                           VkDeviceSize size, VkBufferUsageFlags usage,
                           VkMemoryPropertyFlags properties) {
     device_ = device;
     size_ = size;
     properties_ = properties;
+    usesVMA_ = false;
 
     VkBufferCreateInfo bufferInfo = {};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -81,7 +189,16 @@ bool VulkanBuffer::create(VkDevice device, VkPhysicalDevice physicalDevice,
 }
 
 void VulkanBuffer::destroy() {
-    if (device_ != VK_NULL_HANDLE) {
+    if (usesVMA_ && allocator_ != VK_NULL_HANDLE) {
+        // VMA destruction
+        if (buffer_ != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(allocator_, buffer_, allocation_);
+            buffer_ = VK_NULL_HANDLE;
+            allocation_ = VK_NULL_HANDLE;
+            memory_ = VK_NULL_HANDLE;
+        }
+    } else if (device_ != VK_NULL_HANDLE) {
+        // Legacy destruction
         if (buffer_ != VK_NULL_HANDLE) {
             vkDestroyBuffer(device_, buffer_, nullptr);
             buffer_ = VK_NULL_HANDLE;
@@ -100,13 +217,24 @@ bool VulkanBuffer::upload(const void* data, VkDeviceSize size) {
     }
 
     void* mapped;
-    if (vkMapMemory(device_, memory_, 0, size, 0, &mapped) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "Failed to map buffer memory");
-        return false;
+    if (usesVMA_) {
+        // VMA mapping
+        if (vmaMapMemory(allocator_, allocation_, &mapped) != VK_SUCCESS) {
+            LOG_ERROR("Vulkan", "Failed to map buffer memory with VMA");
+            return false;
+        }
+        memcpy(mapped, data, static_cast<size_t>(size));
+        vmaUnmapMemory(allocator_, allocation_);
+    } else {
+        // Legacy mapping
+        if (vkMapMemory(device_, memory_, 0, size, 0, &mapped) != VK_SUCCESS) {
+            LOG_ERROR("Vulkan", "Failed to map buffer memory");
+            return false;
+        }
+        memcpy(mapped, data, static_cast<size_t>(size));
+        vkUnmapMemory(device_, memory_);
     }
 
-    memcpy(mapped, data, static_cast<size_t>(size));
-    vkUnmapMemory(device_, memory_);
     return true;
 }
 
@@ -278,10 +406,19 @@ VkExtent2D VulkanSwapchain::chooseSwapExtent(
 // VulkanPipeline Implementation
 // ============================================================================
 
+// New flexible create method
 bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
-                             VkExtent2D extent, const std::string& vertShaderPath,
-                             const std::string& fragShaderPath) {
+                           VkExtent2D extent, const std::string& vertShaderPath,
+                           const std::string& fragShaderPath, const Config& config) {
     device_ = device;
+    renderPass_ = renderPass;
+    extent_ = extent;
+    config_ = config;
+    vertShaderPath_ = vertShaderPath;
+    fragShaderPath_ = fragShaderPath;
+
+    // Store descriptor set layouts (they're owned externally)
+    descriptorSetLayouts_ = config.descriptorSetLayouts;
 
     // Load shaders
     std::vector<uint32_t> vertCode, fragCode;
@@ -317,7 +454,302 @@ bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
 
     VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
 
-    // Vertex input
+    // Vertex input (flexible)
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    if (config.vertexInput != nullptr) {
+        vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(config.vertexInput->bindings.size());
+        vertexInputInfo.pVertexBindingDescriptions = config.vertexInput->bindings.data();
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(config.vertexInput->attributes.size());
+        vertexInputInfo.pVertexAttributeDescriptions = config.vertexInput->attributes.data();
+    } else {
+        // No vertex input
+        vertexInputInfo.vertexBindingDescriptionCount = 0;
+        vertexInputInfo.pVertexBindingDescriptions = nullptr;
+        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        vertexInputInfo.pVertexAttributeDescriptions = nullptr;
+    }
+
+    // Input assembly
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    // Viewport and scissor
+    VkViewport viewport = {};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor = {};
+    scissor.offset = {0, 0};
+    scissor.extent = extent;
+
+    VkPipelineViewportStateCreateInfo viewportState = {};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    // Rasterizer
+    VkPipelineRasterizationStateCreateInfo rasterizer = {};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = config.polygonMode;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = config.cullMode;
+    rasterizer.frontFace = config.frontFace;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    // Multisampling
+    VkPipelineMultisampleStateCreateInfo multisampling = {};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Color blending
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = config.blendEnable ? VK_TRUE : VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending = {};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    // Depth/stencil state
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = config.depthTestEnable ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable = config.depthWriteEnable ? VK_TRUE : VK_FALSE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;  // Standard depth test
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    // Pipeline layout
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(config.descriptorSetLayouts.size());
+    pipelineLayoutInfo.pSetLayouts = config.descriptorSetLayouts.empty() ? nullptr : config.descriptorSetLayouts.data();
+    pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(config.pushConstants.size());
+    pipelineLayoutInfo.pPushConstantRanges = config.pushConstants.empty() ? nullptr : config.pushConstants.data();
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &layout_) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create pipeline layout");
+        return false;
+    }
+
+    // Create graphics pipeline
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.layout = layout_;
+    pipelineInfo.renderPass = renderPass;
+    pipelineInfo.subpass = 0;
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
+                                  nullptr, &pipeline_) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create graphics pipeline");
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "Created graphics pipeline");
+    return true;
+}
+
+// Legacy create for backward compatibility
+bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
+                           VkExtent2D extent, const std::string& vertShaderPath,
+                           const std::string& fragShaderPath, bool useDescriptors) {
+    // Use 2D vertex format for legacy path
+    auto vertexDesc = rendering::Vertex2D::getDescription();
+
+    Config config;
+    config.vertexInput = &vertexDesc;
+
+    if (useDescriptors) {
+        // Create legacy single UBO descriptor set layout
+        rendering::DescriptorSetLayoutBuilder builder(device);
+        VkDescriptorSetLayout layout = builder
+            .addBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1)
+            .build();
+
+        if (layout == VK_NULL_HANDLE) {
+            LOG_ERROR("Vulkan", "Failed to create legacy descriptor set layout");
+            return false;
+        }
+
+        config.descriptorSetLayouts.push_back(layout);
+        ownsDescriptorSetLayouts_ = true;  // We created it, we own it
+    }
+
+    return create(device, renderPass, extent, vertShaderPath, fragShaderPath, config);
+}
+
+
+void VulkanPipeline::destroy() {
+    if (device_ != VK_NULL_HANDLE) {
+        if (pipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, pipeline_, nullptr);
+            pipeline_ = VK_NULL_HANDLE;
+        }
+        if (layout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, layout_, nullptr);
+            layout_ = VK_NULL_HANDLE;
+        }
+        // Only destroy descriptor set layouts if we own them (legacy path)
+        if (ownsDescriptorSetLayouts_) {
+            for (auto layout : descriptorSetLayouts_) {
+                if (layout != VK_NULL_HANDLE) {
+                    vkDestroyDescriptorSetLayout(device_, layout, nullptr);
+                }
+            }
+        }
+        descriptorSetLayouts_.clear();
+        if (vertShaderModule_ != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_, vertShaderModule_, nullptr);
+            vertShaderModule_ = VK_NULL_HANDLE;
+        }
+        if (fragShaderModule_ != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_, fragShaderModule_, nullptr);
+            fragShaderModule_ = VK_NULL_HANDLE;
+        }
+    }
+}
+
+VkShaderModule VulkanPipeline::createShaderModule(const std::vector<uint32_t>& code) {
+    VkShaderModuleCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = code.size() * sizeof(uint32_t);
+    createInfo.pCode = code.data();
+
+    VkShaderModule shaderModule;
+    if (vkCreateShaderModule(device_, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    return shaderModule;
+}
+
+bool VulkanPipeline::loadShaderFile(const std::string& filename, std::vector<uint32_t>& code) {
+    // Try multiple search paths
+    const char* searchPaths[] = {
+        "",                    // Current directory
+        "./shaders/",         // Build directory shaders
+        "../shaders/",        // Source directory shaders
+        "shaders/",           // Relative shaders
+        "./bin/shaders/",     // Binary output shaders
+        "../bin/shaders/",    // Parent binary shaders
+        "bin/shaders/",       // Relative binary shaders
+    };
+
+    for (const char* path : searchPaths) {
+        std::string fullPath = std::string(path) + filename;
+        std::ifstream file(fullPath, std::ios::ate | std::ios::binary);
+
+        if (file.is_open()) {
+            size_t fileSize = static_cast<size_t>(file.tellg());
+            code.resize(fileSize / sizeof(uint32_t));
+            file.seekg(0);
+            file.read(reinterpret_cast<char*>(code.data()), fileSize);
+            file.close();
+            LOG_INFO("Vulkan", "Loaded shader: %s", fullPath.c_str());
+            return true;
+        }
+    }
+
+    LOG_ERROR("Vulkan", "Failed to find shader file: %s", filename.c_str());
+    return false;
+}
+
+bool VulkanPipeline::reload(const std::vector<uint32_t>& vertCode, const std::vector<uint32_t>& fragCode) {
+    if (device_ == VK_NULL_HANDLE) {
+        LOG_ERROR("Vulkan", "Cannot reload pipeline - not initialized");
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "Reloading pipeline shaders...");
+
+    // Wait for device to be idle before recreating pipeline
+    vkDeviceWaitIdle(device_);
+
+    // Create new shader modules
+    VkShaderModule newVertModule = createShaderModule(vertCode);
+    VkShaderModule newFragModule = createShaderModule(fragCode);
+
+    if (newVertModule == VK_NULL_HANDLE || newFragModule == VK_NULL_HANDLE) {
+        LOG_ERROR("Vulkan", "Failed to create new shader modules for reload");
+        if (newVertModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_, newVertModule, nullptr);
+        }
+        if (newFragModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_, newFragModule, nullptr);
+        }
+        return false;
+    }
+
+    // Attempt to recreate pipeline with new shaders
+    if (!recreatePipeline(newVertModule, newFragModule)) {
+        LOG_ERROR("Vulkan", "Failed to recreate pipeline with new shaders");
+        vkDestroyShaderModule(device_, newVertModule, nullptr);
+        vkDestroyShaderModule(device_, newFragModule, nullptr);
+        return false;
+    }
+
+    // Success - destroy old shader modules and store new ones
+    if (vertShaderModule_ != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device_, vertShaderModule_, nullptr);
+    }
+    if (fragShaderModule_ != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device_, fragShaderModule_, nullptr);
+    }
+
+    vertShaderModule_ = newVertModule;
+    fragShaderModule_ = newFragModule;
+
+    LOG_INFO("Vulkan", "Pipeline reloaded successfully");
+    return true;
+}
+
+bool VulkanPipeline::recreatePipeline(VkShaderModule vertModule, VkShaderModule fragModule) {
+    // Destroy old pipeline but keep layout and descriptor set layout
+    if (pipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, pipeline_, nullptr);
+        pipeline_ = VK_NULL_HANDLE;
+    }
+
+    // Shader stages
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
+    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageInfo.module = vertModule;
+    vertShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragModule;
+    fragShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+    // Vertex input (same as original)
     VkVertexInputBindingDescription bindingDescription = {};
     bindingDescription.binding = 0;
     bindingDescription.stride = sizeof(VulkanRenderer::Vertex);
@@ -351,14 +783,14 @@ bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
     VkViewport viewport = {};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = static_cast<float>(extent.width);
-    viewport.height = static_cast<float>(extent.height);
+    viewport.width = static_cast<float>(extent_.width);
+    viewport.height = static_cast<float>(extent_.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 
     VkRect2D scissor = {};
     scissor.offset = {0, 0};
-    scissor.extent = extent;
+    scissor.extent = extent_;
 
     VkPipelineViewportStateCreateInfo viewportState = {};
     viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -375,7 +807,7 @@ bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_FALSE;
 
     // Multisampling
@@ -396,16 +828,7 @@ bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &colorBlendAttachment;
 
-    // Pipeline layout
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &layout_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "Failed to create pipeline layout");
-        return false;
-    }
-
-    // Create graphics pipeline
+    // Create graphics pipeline with existing layout
     VkGraphicsPipelineCreateInfo pipelineInfo = {};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineInfo.stageCount = 2;
@@ -417,79 +840,16 @@ bool VulkanPipeline::create(VkDevice device, VkRenderPass renderPass,
     pipelineInfo.pMultisampleState = &multisampling;
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.layout = layout_;
-    pipelineInfo.renderPass = renderPass;
+    pipelineInfo.renderPass = renderPass_;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
+    if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo,
                                   nullptr, &pipeline_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "Failed to create graphics pipeline");
+        LOG_ERROR("Vulkan", "Failed to recreate graphics pipeline");
         return false;
     }
 
-    LOG_INFO("Vulkan", "Created graphics pipeline");
     return true;
-}
-
-void VulkanPipeline::destroy() {
-    if (device_ != VK_NULL_HANDLE) {
-        if (pipeline_ != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device_, pipeline_, nullptr);
-            pipeline_ = VK_NULL_HANDLE;
-        }
-        if (layout_ != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device_, layout_, nullptr);
-            layout_ = VK_NULL_HANDLE;
-        }
-        if (vertShaderModule_ != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(device_, vertShaderModule_, nullptr);
-            vertShaderModule_ = VK_NULL_HANDLE;
-        }
-        if (fragShaderModule_ != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(device_, fragShaderModule_, nullptr);
-            fragShaderModule_ = VK_NULL_HANDLE;
-        }
-    }
-}
-
-VkShaderModule VulkanPipeline::createShaderModule(const std::vector<uint32_t>& code) {
-    VkShaderModuleCreateInfo createInfo = {};
-    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = code.size() * sizeof(uint32_t);
-    createInfo.pCode = code.data();
-
-    VkShaderModule shaderModule;
-    if (vkCreateShaderModule(device_, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-        return VK_NULL_HANDLE;
-    }
-    return shaderModule;
-}
-
-bool VulkanPipeline::loadShaderFile(const std::string& filename, std::vector<uint32_t>& code) {
-    // Try multiple search paths
-    const char* searchPaths[] = {
-        "",                    // Current directory
-        "./shaders/",         // Build directory shaders
-        "../shaders/",        // Source directory shaders
-        "shaders/",           // Relative shaders
-    };
-
-    for (const char* path : searchPaths) {
-        std::string fullPath = std::string(path) + filename;
-        std::ifstream file(fullPath, std::ios::ate | std::ios::binary);
-
-        if (file.is_open()) {
-            size_t fileSize = static_cast<size_t>(file.tellg());
-            code.resize(fileSize / sizeof(uint32_t));
-            file.seekg(0);
-            file.read(reinterpret_cast<char*>(code.data()), fileSize);
-            file.close();
-            LOG_INFO("Vulkan", "Loaded shader: %s", fullPath.c_str());
-            return true;
-        }
-    }
-
-    LOG_ERROR("Vulkan", "Failed to find shader file: %s", filename.c_str());
-    return false;
 }
 
 // ============================================================================
@@ -523,11 +883,21 @@ bool VulkanContext::initialize(const Window& window, bool enableValidation) {
         return false;
     }
 
+    if (!createAllocator()) {
+        LOG_ERROR("Vulkan", "Failed to create VMA allocator");
+        return false;
+    }
+
     LOG_INFO("Vulkan", "Vulkan context initialized successfully");
     return true;
 }
 
 void VulkanContext::destroy() {
+    if (allocator_ != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(allocator_);
+        allocator_ = VK_NULL_HANDLE;
+    }
+
     if (device_ != VK_NULL_HANDLE) {
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
@@ -567,6 +937,16 @@ bool VulkanContext::createInstance(const Window& window) {
     auto extensions = window.getRequiredExtensions();
     if (enableValidation_) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+    // Required for MoltenVK on macOS - add portability extension
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    extensions.push_back("VK_KHR_get_physical_device_properties2");
+
+    // Log requested extensions for debugging
+    LOG_INFO("Vulkan", "Requesting %zu Vulkan extensions:", extensions.size());
+    for (const auto* ext : extensions) {
+        LOG_INFO("Vulkan", "  - %s", ext);
     }
 
     VkInstanceCreateInfo createInfo = {};
@@ -701,6 +1081,75 @@ bool VulkanContext::createLogicalDevice() {
         queueCreateInfos.push_back(queueCreateInfo);
     }
 
+    // Query available extensions
+    uint32_t extensionCount;
+    vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extensionCount, availableExtensions.data());
+
+    // Build extension list with modern features
+    std::vector<const char*> deviceExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        "VK_KHR_portability_subset"  // Required for MoltenVK
+    };
+
+    // Check for modern Vulkan extensions (store in member variables for VMA)
+    hasDescriptorIndexing_ = false;
+    hasBufferDeviceAddress_ = false;
+    hasSynchronization2_ = false;
+
+    for (const auto& ext : availableExtensions) {
+        if (strcmp(ext.extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) == 0) {
+            hasDescriptorIndexing_ = true;
+            deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+            LOG_INFO("Vulkan", "Enabling VK_EXT_descriptor_indexing for bindless textures");
+        }
+        if (strcmp(ext.extensionName, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
+            hasBufferDeviceAddress_ = true;
+            deviceExtensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+            LOG_INFO("Vulkan", "Enabling VK_KHR_buffer_device_address for GPU pointers");
+        }
+        if (strcmp(ext.extensionName, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0) {
+            hasSynchronization2_ = true;
+            deviceExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+            LOG_INFO("Vulkan", "Enabling VK_KHR_synchronization2 for modern barriers");
+        }
+    }
+
+    // Enable modern features via pNext chain
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures = {};
+    descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    descriptorIndexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
+    descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
+    descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount = VK_TRUE;  // For unbounded arrays
+    descriptorIndexingFeatures.pNext = nullptr;
+
+    VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures = {};
+    bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    bufferDeviceAddressFeatures.bufferDeviceAddress = VK_TRUE;
+    bufferDeviceAddressFeatures.pNext = nullptr;
+
+    VkPhysicalDeviceSynchronization2Features synchronization2Features = {};
+    synchronization2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    synchronization2Features.synchronization2 = VK_TRUE;
+    synchronization2Features.pNext = nullptr;
+
+    // Chain features together
+    void* pNext = nullptr;
+    if (hasDescriptorIndexing_) {
+        descriptorIndexingFeatures.pNext = pNext;
+        pNext = &descriptorIndexingFeatures;
+    }
+    if (hasBufferDeviceAddress_) {
+        bufferDeviceAddressFeatures.pNext = pNext;
+        pNext = &bufferDeviceAddressFeatures;
+    }
+    if (hasSynchronization2_) {
+        synchronization2Features.pNext = pNext;
+        pNext = &synchronization2Features;
+    }
+
     VkPhysicalDeviceFeatures deviceFeatures = {};
 
     VkDeviceCreateInfo createInfo = {};
@@ -708,13 +1157,9 @@ bool VulkanContext::createLogicalDevice() {
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.pEnabledFeatures = &deviceFeatures;
-
-    const char* deviceExtensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        "VK_KHR_portability_subset"  // Required for MoltenVK
-    };
-    createInfo.enabledExtensionCount = 2;
-    createInfo.ppEnabledExtensionNames = deviceExtensions;
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    createInfo.pNext = pNext;
 
     if (vkCreateDevice(physicalDevice_, &createInfo, nullptr, &device_) != VK_SUCCESS) {
         LOG_ERROR("Vulkan", "Failed to create logical device");
@@ -724,7 +1169,38 @@ bool VulkanContext::createLogicalDevice() {
     vkGetDeviceQueue(device_, graphicsFamily_, 0, &graphicsQueue_);
     vkGetDeviceQueue(device_, presentFamily_, 0, &presentQueue_);
 
-    LOG_INFO("Vulkan", "Created logical device");
+    LOG_INFO("Vulkan", "Created logical device with modern Vulkan features");
+    return true;
+}
+
+bool VulkanContext::createAllocator() {
+    // VMA is configured for dynamic function loading (VMA_STATIC_VULKAN_FUNCTIONS 0)
+    // Provide Vulkan function loaders (VMA will load other functions dynamically)
+    VmaVulkanFunctions vulkanFunctions = {};
+    vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+
+    VmaAllocatorCreateInfo allocatorInfo = {};
+    // Don't set vulkanApiVersion - let VMA detect it automatically
+    allocatorInfo.physicalDevice = physicalDevice_;
+    allocatorInfo.device = device_;
+    allocatorInfo.instance = instance_;
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+
+    // Conditionally enable buffer device address if the feature is available
+    allocatorInfo.flags = 0;
+    if (hasBufferDeviceAddress_) {
+        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        LOG_INFO("Vulkan", "VMA: Enabling buffer device address support");
+    }
+
+    LOG_INFO("Vulkan", "Calling vmaCreateAllocator...");
+    if (vmaCreateAllocator(&allocatorInfo, &allocator_) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create VMA allocator");
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "Created VMA allocator");
     return true;
 }
 
@@ -742,7 +1218,16 @@ bool VulkanRenderer::initialize(const Window& window, bool enableValidation) {
         return false;
     }
 
+    // Create depth resources before render pass (render pass needs depth format)
+    if (!createDepthResources()) {
+        return false;
+    }
+
     if (!createRenderPass()) {
+        return false;
+    }
+
+    if (!createPipelineCache()) {
         return false;
     }
 
@@ -770,6 +1255,17 @@ void VulkanRenderer::destroy() {
     if (context_.getDevice() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(context_.getDevice());
 
+        // Destroy uniform buffers
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            uniformBuffers_[i].destroy();
+        }
+
+        // Destroy descriptor pool (also frees descriptor sets)
+        if (descriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(context_.getDevice(), descriptorPool_, nullptr);
+            descriptorPool_ = VK_NULL_HANDLE;
+        }
+
         // Destroy sync objects
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (renderFinishedSemaphores_[i] != VK_NULL_HANDLE) {
@@ -795,9 +1291,14 @@ void VulkanRenderer::destroy() {
 
         pipeline_.destroy();
 
+        destroyPipelineCache();
+
         if (renderPass_ != VK_NULL_HANDLE) {
             vkDestroyRenderPass(context_.getDevice(), renderPass_, nullptr);
         }
+
+        // Destroy depth resources
+        destroyDepthResources();
     }
 
     swapchain_.destroy();
@@ -889,9 +1390,12 @@ void VulkanRenderer::beginRenderPass(uint32_t imageIndex) {
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = swapchain_.getExtent();
 
-    VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
-    renderPassInfo.clearValueCount = 1;
-    renderPassInfo.pClearValues = &clearColor;
+    VkClearValue clearValues[2] = {};
+    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    clearValues[1].depthStencil = {1.0f, 0};
+
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(commandBuffers_[currentFrame_], &renderPassInfo,
                         VK_SUBPASS_CONTENTS_INLINE);
@@ -934,12 +1438,13 @@ bool VulkanRenderer::createIndexBuffer(const void* indices, VkDeviceSize size,
 }
 
 bool VulkanRenderer::createPipeline(const std::string& vertShader,
-                                   const std::string& fragShader) {
+                                   const std::string& fragShader, bool useDescriptors) {
     return pipeline_.create(context_.getDevice(), renderPass_,
-                           swapchain_.getExtent(), vertShader, fragShader);
+                           swapchain_.getExtent(), vertShader, fragShader, useDescriptors);
 }
 
 bool VulkanRenderer::createRenderPass() {
+    // Color attachment
     VkAttachmentDescription colorAttachment = {};
     colorAttachment.format = swapchain_.getFormat();
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -950,27 +1455,48 @@ bool VulkanRenderer::createRenderPass() {
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
+    // Depth attachment
+    VkAttachmentDescription depthAttachment = {};
+    depthAttachment.format = depthFormat_;
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // Don't need to save depth
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference colorAttachmentRef = {};
     colorAttachmentRef.attachment = 0;
     colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depthAttachmentRef = {};
+    depthAttachmentRef.attachment = 1;
+    depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription subpass = {};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorAttachmentRef;
+    subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
+    // Subpass dependency for depth
     VkSubpassDependency dependency = {};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dependency.srcAccessMask = 0;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
+    VkAttachmentDescription attachments[] = {colorAttachment, depthAttachment};
     VkRenderPassCreateInfo renderPassInfo = {};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.attachmentCount = 2;
+    renderPassInfo.pAttachments = attachments;
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
     renderPassInfo.dependencyCount = 1;
@@ -985,17 +1511,70 @@ bool VulkanRenderer::createRenderPass() {
     return true;
 }
 
+bool VulkanRenderer::createPipelineCache() {
+    // Try to load existing pipeline cache from disk
+    std::vector<char> cacheData;
+    std::string cacheFilename = "pipeline_cache.bin";
+    std::ifstream cacheFile(cacheFilename, std::ios::binary | std::ios::ate);
+
+    if (cacheFile.is_open()) {
+        size_t fileSize = static_cast<size_t>(cacheFile.tellg());
+        cacheFile.seekg(0);
+        cacheData.resize(fileSize);
+        cacheFile.read(cacheData.data(), fileSize);
+        cacheFile.close();
+        LOG_INFO("Vulkan", "Loaded pipeline cache from disk (%zu bytes)", fileSize);
+    }
+
+    VkPipelineCacheCreateInfo cacheInfo = {};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheInfo.initialDataSize = cacheData.size();
+    cacheInfo.pInitialData = cacheData.empty() ? nullptr : cacheData.data();
+
+    if (vkCreatePipelineCache(context_.getDevice(), &cacheInfo, nullptr, &pipelineCache_) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create pipeline cache");
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "Created pipeline cache");
+    return true;
+}
+
+void VulkanRenderer::destroyPipelineCache() {
+    if (pipelineCache_ != VK_NULL_HANDLE) {
+        // Save pipeline cache to disk before destroying
+        size_t cacheSize = 0;
+        vkGetPipelineCacheData(context_.getDevice(), pipelineCache_, &cacheSize, nullptr);
+
+        if (cacheSize > 0) {
+            std::vector<char> cacheData(cacheSize);
+            if (vkGetPipelineCacheData(context_.getDevice(), pipelineCache_, &cacheSize, cacheData.data()) == VK_SUCCESS) {
+                std::string cacheFilename = "pipeline_cache.bin";
+                std::ofstream cacheFile(cacheFilename, std::ios::binary);
+                if (cacheFile.is_open()) {
+                    cacheFile.write(cacheData.data(), cacheSize);
+                    cacheFile.close();
+                    LOG_INFO("Vulkan", "Saved pipeline cache to disk (%zu bytes)", cacheSize);
+                }
+            }
+        }
+
+        vkDestroyPipelineCache(context_.getDevice(), pipelineCache_, nullptr);
+        pipelineCache_ = VK_NULL_HANDLE;
+    }
+}
+
 bool VulkanRenderer::createFramebuffers() {
     const auto& imageViews = swapchain_.getImageViews();
     framebuffers_.resize(imageViews.size());
 
     for (size_t i = 0; i < imageViews.size(); i++) {
-        VkImageView attachments[] = {imageViews[i]};
+        VkImageView attachments[] = {imageViews[i], depthImageView_};
 
         VkFramebufferCreateInfo framebufferInfo = {};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebufferInfo.renderPass = renderPass_;
-        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.attachmentCount = 2;
         framebufferInfo.pAttachments = attachments;
         framebufferInfo.width = swapchain_.getExtent().width;
         framebufferInfo.height = swapchain_.getExtent().height;
@@ -1065,6 +1644,220 @@ bool VulkanRenderer::createSyncObjects() {
     }
 
     return true;
+}
+
+bool VulkanRenderer::createUniformBuffers() {
+    if (!pipeline_.hasDescriptors()) {
+        return true;  // No uniform buffers needed
+    }
+
+    VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (!uniformBuffers_[i].create(context_.getDevice(), context_.getPhysicalDevice(),
+                                       bufferSize,
+                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            LOG_ERROR("Vulkan", "Failed to create uniform buffer %zu", i);
+            return false;
+        }
+    }
+
+    LOG_INFO("Vulkan", "Created uniform buffers");
+    return true;
+}
+
+bool VulkanRenderer::updateUniformBuffer(uint32_t frameIndex, const UniformBufferObject& ubo) {
+    if (!pipeline_.hasDescriptors()) {
+        return true;  // Nothing to update
+    }
+
+    if (frameIndex >= MAX_FRAMES_IN_FLIGHT) {
+        LOG_ERROR("Vulkan", "Invalid frame index: %u", frameIndex);
+        return false;
+    }
+
+    return uniformBuffers_[frameIndex].upload(&ubo, sizeof(UniformBufferObject));
+}
+
+bool VulkanRenderer::createDescriptorPool() {
+    if (!pipeline_.hasDescriptors()) {
+        return true;  // No descriptor pool needed
+    }
+
+    // Create flexible descriptor pool that can handle UBOs, samplers, and images
+    // Size it generously for typical use cases
+    rendering::DescriptorPoolBuilder poolBuilder(context_.getDevice());
+    poolBuilder.setMaxSets(MAX_FRAMES_IN_FLIGHT * 4)  // Support multiple sets per frame
+               .addPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT * 10)
+               .addPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT * 20)
+               .addPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT * 5);
+
+    descriptorPool_ = poolBuilder.build(VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
+
+    if (descriptorPool_ == VK_NULL_HANDLE) {
+        LOG_ERROR("Vulkan", "Failed to create descriptor pool");
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "Created flexible descriptor pool");
+    return true;
+}
+
+bool VulkanRenderer::createDescriptorSets() {
+    if (!pipeline_.hasDescriptors()) {
+        return true;  // No descriptor sets needed
+    }
+
+    std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT> layouts;
+    const auto& pipelineLayouts = pipeline_.getDescriptorSetLayouts();
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        layouts[i] = pipelineLayouts.empty() ? VK_NULL_HANDLE : pipelineLayouts[0];
+    }
+
+    VkDescriptorSetAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool_;
+    allocInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+    allocInfo.pSetLayouts = layouts.data();
+
+    if (vkAllocateDescriptorSets(context_.getDevice(), &allocInfo, descriptorSets_.data()) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to allocate descriptor sets");
+        return false;
+    }
+
+    // Update descriptor sets to point to uniform buffers
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo bufferInfo = {};
+        bufferInfo.buffer = uniformBuffers_[i].getBuffer();
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(UniformBufferObject);
+
+        VkWriteDescriptorSet descriptorWrite = {};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = descriptorSets_[i];
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(context_.getDevice(), 1, &descriptorWrite, 0, nullptr);
+    }
+
+    LOG_INFO("Vulkan", "Created and updated descriptor sets");
+    return true;
+}
+
+void VulkanRenderer::bindDescriptorSets() {
+    if (!pipeline_.hasDescriptors()) {
+        return;  // Nothing to bind
+    }
+
+    vkCmdBindDescriptorSets(getCurrentCommandBuffer(),
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline_.getLayout(),
+                            0, 1, &descriptorSets_[currentFrame_],
+                            0, nullptr);
+}
+
+// ============================================================================
+// Depth Buffer Implementation
+// ============================================================================
+
+VkFormat VulkanRenderer::findDepthFormat() {
+    // Try formats in order of preference
+    std::vector<VkFormat> candidates = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT
+    };
+
+    for (VkFormat format : candidates) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(context_.getPhysicalDevice(), format, &props);
+
+        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            return format;
+        }
+    }
+
+    LOG_ERROR("Vulkan", "Failed to find supported depth format");
+    return VK_FORMAT_UNDEFINED;
+}
+
+bool VulkanRenderer::hasStencilComponent(VkFormat format) {
+    return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+}
+
+bool VulkanRenderer::createDepthResources() {
+    depthFormat_ = findDepthFormat();
+    if (depthFormat_ == VK_FORMAT_UNDEFINED) {
+        return false;
+    }
+
+    VkExtent2D extent = swapchain_.getExtent();
+
+    // Create depth image
+    VkImageCreateInfo imageInfo = {};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = extent.width;
+    imageInfo.extent.height = extent.height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = depthFormat_;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocInfo = {};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateImage(context_.getAllocator(), &imageInfo, &allocInfo,
+                      &depthImage_, &depthImageAllocation_, nullptr) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create depth image");
+        return false;
+    }
+
+    // Create depth image view
+    VkImageViewCreateInfo viewInfo = {};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = depthImage_;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = depthFormat_;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(context_.getDevice(), &viewInfo, nullptr, &depthImageView_) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to create depth image view");
+        vmaDestroyImage(context_.getAllocator(), depthImage_, depthImageAllocation_);
+        depthImage_ = VK_NULL_HANDLE;
+        depthImageAllocation_ = VK_NULL_HANDLE;
+        return false;
+    }
+
+    LOG_INFO("Vulkan", "Created depth buffer (%ux%u)", extent.width, extent.height);
+    return true;
+}
+
+void VulkanRenderer::destroyDepthResources() {
+    if (depthImageView_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(context_.getDevice(), depthImageView_, nullptr);
+        depthImageView_ = VK_NULL_HANDLE;
+    }
+
+    if (depthImage_ != VK_NULL_HANDLE) {
+        vmaDestroyImage(context_.getAllocator(), depthImage_, depthImageAllocation_);
+        depthImage_ = VK_NULL_HANDLE;
+        depthImageAllocation_ = VK_NULL_HANDLE;
+    }
 }
 
 } // namespace vulkan

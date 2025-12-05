@@ -605,15 +605,9 @@ std::string SystemInfo::getSystemLanguage() {
 }
 
 // ============================================================================
-// Window Implementation (Basic placeholder)
+// Window Implementation
 // ============================================================================
-
-std::unique_ptr<Window> Window::create(const CreateParams& params) {
-    // Placeholder implementation - would need platform-specific window creation
-    std::cout << "Window creation requested: " << params.title
-              << " (" << params.width << "x" << params.height << ")" << std::endl;
-    return nullptr; // Not implemented yet
-}
+// Window::create() is now implemented in window_sdl.cpp using SDL3
 
 // ============================================================================
 // Global Functions

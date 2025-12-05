@@ -1,0 +1,81 @@
+#version 450
+/**
+ * @file luminance_histogram.comp
+ * @brief Build luminance histogram from HDR image
+ * 
+ * Samples the HDR color buffer, computes log luminance, and atomically
+ * increments the corresponding histogram bin.
+ */
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// HDR source image
+layout(set = 0, binding = 0) uniform sampler2D hdrImage;
+
+// Exposure buffer with histogram
+layout(set = 0, binding = 1) buffer ExposureBuffer {
+    uint histogram[256];       // Log luminance histogram
+    float averageLuminance;    // Computed in histogram_average.comp
+    float currentExposure;     // Current exposure value
+    float targetExposure;      // Target exposure value
+    float _padding;
+} exposure;
+
+// Push constants for configuration
+layout(push_constant) uniform PushConstants {
+    float minLogLuminance;     // Minimum log luminance (typically -10)
+    float maxLogLuminance;     // Maximum log luminance (typically 2)
+    float invLogLuminanceRange; // 1.0 / (max - min)
+    uint pixelCount;           // Total pixels in image
+} params;
+
+// Shared memory for local histogram reduction
+shared uint localHistogram[256];
+
+void main() {
+    // Initialize shared memory
+    uint localIndex = gl_LocalInvocationIndex;
+    if (localIndex < 256) {
+        localHistogram[localIndex] = 0;
+    }
+    barrier();
+
+    // Get image dimensions and pixel coordinates
+    ivec2 imageSize = textureSize(hdrImage, 0);
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+
+    // Process pixel if within bounds
+    if (pixelCoord.x < imageSize.x && pixelCoord.y < imageSize.y) {
+        // Sample HDR color
+        vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(imageSize);
+        vec3 hdrColor = texture(hdrImage, uv).rgb;
+
+        // Calculate luminance (Rec. 709 coefficients)
+        float luminance = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
+
+        // Skip very dark pixels (avoid log(0))
+        if (luminance > 0.001) {
+            // Convert to log luminance
+            float logLuminance = log2(luminance);
+
+            // Map to histogram bin [0, 255]
+            float normalizedLog = (logLuminance - params.minLogLuminance) * params.invLogLuminanceRange;
+            normalizedLog = clamp(normalizedLog, 0.0, 1.0);
+            uint bin = uint(normalizedLog * 255.0);
+
+            // Atomic increment in shared memory (faster than global)
+            atomicAdd(localHistogram[bin], 1);
+        }
+    }
+
+    // Wait for all local threads to finish
+    barrier();
+
+    // Accumulate local histogram to global histogram
+    if (localIndex < 256) {
+        if (localHistogram[localIndex] > 0) {
+            atomicAdd(exposure.histogram[localIndex], localHistogram[localIndex]);
+        }
+    }
+}
+

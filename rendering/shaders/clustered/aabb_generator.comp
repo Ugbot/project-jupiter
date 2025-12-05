@@ -1,0 +1,138 @@
+#version 460 core
+
+/**
+ * Clustered Forward - AABB Generator
+ * 
+ * Generates view-space AABBs for each cluster in the frustum grid.
+ * Based on "Clustered Deferred and Forward Shading" by Olsson et al.
+ * and the Angel Ortiz implementation.
+ * 
+ * Each work group computes one cluster's AABB.
+ */
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+struct AABB {
+    vec4 minPoint;  // xyz = min corner
+    vec4 maxPoint;  // xyz = max corner
+};
+
+// ============================================================================
+// Buffers
+// ============================================================================
+
+// Output: Cluster AABBs
+layout(set = 0, binding = 0) writeonly buffer ClusterAABBs {
+    AABB clusters[];
+};
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    mat4 inverseProjection;
+    uint clusterCountX;
+    uint clusterCountY;
+    uint clusterCountZ;
+    float zNear;
+    float zFar;
+    uint screenWidth;
+    uint screenHeight;
+    float padding;
+} pc;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Convert screen-space coordinates to view-space
+ * screen: xy in [0,1], z = depth
+ */
+vec4 screenToView(vec4 screen) {
+    // Convert to NDC clip space
+    vec4 clip = vec4(
+        screen.x * 2.0 - 1.0,
+        screen.y * 2.0 - 1.0,
+        screen.z,
+        screen.w
+    );
+    
+    // Transform to view space
+    vec4 view = pc.inverseProjection * clip;
+    
+    // Perspective divide
+    view = view / view.w;
+    
+    return view;
+}
+
+/**
+ * Find intersection of ray from origin through point with z-plane
+ */
+vec3 rayIntersectZPlane(vec3 incident, float zOffset) {
+    return incident * zOffset / incident.z;
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+void main() {
+    // Calculate linear cluster index
+    uint tileIndex = 
+        gl_WorkGroupID.x +
+        gl_WorkGroupID.y * gl_NumWorkGroups.x +
+        gl_WorkGroupID.z * gl_NumWorkGroups.x * gl_NumWorkGroups.y;
+
+    // Normalized tile size
+    vec2 normPerTileSize = vec2(
+        1.0 / float(pc.clusterCountX),
+        1.0 / float(pc.clusterCountY)
+    );
+
+    // Screen-space bounds of this cluster (normalized 0-1)
+    // Min = bottom-left, Max = top-right
+    vec4 minSS = vec4(
+        gl_WorkGroupID.x * normPerTileSize.x,
+        gl_WorkGroupID.y * normPerTileSize.y,
+        0.0,
+        1.0
+    );
+    vec4 maxSS = vec4(
+        (gl_WorkGroupID.x + 1.0) * normPerTileSize.x,
+        (gl_WorkGroupID.y + 1.0) * normPerTileSize.y,
+        0.0,
+        1.0
+    );
+
+    // Convert to view space (rays from origin)
+    vec3 minVS = screenToView(minSS).xyz;
+    vec3 maxVS = screenToView(maxSS).xyz;
+
+    // Compute near and far Z for this depth slice
+    // Using exponential distribution for better detail near camera
+    // Equation: z = near * (far/near)^(slice/sliceCount)
+    float sliceNear = -pc.zNear * pow(pc.zFar / pc.zNear, float(gl_WorkGroupID.z) / float(pc.clusterCountZ));
+    float sliceFar = -pc.zNear * pow(pc.zFar / pc.zNear, float(gl_WorkGroupID.z + 1) / float(pc.clusterCountZ));
+
+    // Find intersection points of frustum rays with near/far planes
+    vec3 minNear = rayIntersectZPlane(minVS, sliceNear);
+    vec3 minFar = rayIntersectZPlane(minVS, sliceFar);
+    vec3 maxNear = rayIntersectZPlane(maxVS, sliceNear);
+    vec3 maxFar = rayIntersectZPlane(maxVS, sliceFar);
+
+    // Compute AABB from all intersection points
+    vec3 minAABB = min(min(minNear, minFar), min(maxNear, maxFar));
+    vec3 maxAABB = max(max(minNear, minFar), max(maxNear, maxFar));
+
+    // Store result
+    clusters[tileIndex].minPoint = vec4(minAABB, 0.0);
+    clusters[tileIndex].maxPoint = vec4(maxAABB, 0.0);
+}
+

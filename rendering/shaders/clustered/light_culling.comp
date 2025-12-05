@@ -1,0 +1,174 @@
+#version 460 core
+
+/**
+ * Clustered Forward - Light Culling
+ * 
+ * Tests each light against cluster AABBs and builds per-cluster
+ * light lists. Uses atomic operations for thread-safe index allocation.
+ * 
+ * Each work group processes one cluster.
+ */
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// Maximum lights per cluster (prevent buffer overflow)
+#define MAX_LIGHTS_PER_CLUSTER 100
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+struct AABB {
+    vec4 minPoint;
+    vec4 maxPoint;
+};
+
+struct Light {
+    vec4 position;  // xyz = world position, w = radius
+    vec4 color;     // xyz = color, w = intensity
+};
+
+struct LightCell {
+    uint offset;    // Starting index in lightIndices
+    uint count;     // Number of lights in this cluster
+};
+
+// ============================================================================
+// Buffers
+// ============================================================================
+
+// Input: Cluster AABBs (from AABB generator)
+layout(set = 0, binding = 0) readonly buffer ClusterAABBs {
+    AABB clusters[];
+};
+
+// Input: All lights in scene
+layout(set = 0, binding = 1) readonly buffer Lights {
+    Light lights[];
+};
+
+// Atomic counter for global light index allocation
+layout(set = 0, binding = 2) buffer AtomicCounter {
+    uint globalIndex;
+};
+
+// Output: Per-cluster light info
+layout(set = 0, binding = 3) writeonly buffer LightCells {
+    LightCell lightCells[];
+};
+
+// Output: Light indices for all clusters
+layout(set = 0, binding = 4) writeonly buffer LightIndices {
+    uint lightIndices[];
+};
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewMatrix;
+    uint clusterCountX;
+    uint clusterCountY;
+    uint clusterCountZ;
+    uint lightCount;
+    uint maxLightsPerCluster;
+    float padding[3];
+} pc;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Compute squared distance from point to AABB
+ */
+float squaredDistancePointAABB(vec3 point, uint tileIndex) {
+    AABB aabb = clusters[tileIndex];
+    
+    float sqDist = 0.0;
+    
+    // X axis
+    if (point.x < aabb.minPoint.x) {
+        float diff = aabb.minPoint.x - point.x;
+        sqDist += diff * diff;
+    } else if (point.x > aabb.maxPoint.x) {
+        float diff = point.x - aabb.maxPoint.x;
+        sqDist += diff * diff;
+    }
+    
+    // Y axis
+    if (point.y < aabb.minPoint.y) {
+        float diff = aabb.minPoint.y - point.y;
+        sqDist += diff * diff;
+    } else if (point.y > aabb.maxPoint.y) {
+        float diff = point.y - aabb.maxPoint.y;
+        sqDist += diff * diff;
+    }
+    
+    // Z axis
+    if (point.z < aabb.minPoint.z) {
+        float diff = aabb.minPoint.z - point.z;
+        sqDist += diff * diff;
+    } else if (point.z > aabb.maxPoint.z) {
+        float diff = point.z - aabb.maxPoint.z;
+        sqDist += diff * diff;
+    }
+    
+    return sqDist;
+}
+
+/**
+ * Test if light sphere intersects cluster AABB
+ */
+bool testSphereAABB(uint lightIndex, uint tileIndex) {
+    Light light = lights[lightIndex];
+    float radius = light.position.w;
+    
+    // Transform light position to view space
+    vec4 posView = pc.viewMatrix * vec4(light.position.xyz, 1.0);
+    
+    float sqDist = squaredDistancePointAABB(posView.xyz, tileIndex);
+    
+    return sqDist < (radius * radius);
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+void main() {
+    // Calculate linear cluster index
+    uint tileIndex = 
+        gl_WorkGroupID.x +
+        gl_WorkGroupID.y * gl_NumWorkGroups.x +
+        gl_WorkGroupID.z * gl_NumWorkGroups.x * gl_NumWorkGroups.y;
+
+    // Local array for visible lights (avoid global memory thrashing)
+    uint visibleLightIndices[MAX_LIGHTS_PER_CLUSTER];
+    uint visibleCount = 0;
+
+    // Test all lights against this cluster
+    for (uint i = 0; i < pc.lightCount && visibleCount < MAX_LIGHTS_PER_CLUSTER; ++i) {
+        if (testSphereAABB(i, tileIndex)) {
+            visibleLightIndices[visibleCount++] = i;
+        }
+    }
+
+    // Allocate space in global light indices buffer
+    uint offset = atomicAdd(globalIndex, visibleCount);
+
+    // Write light indices to global buffer
+    for (uint i = 0; i < visibleCount; ++i) {
+        lightIndices[offset + i] = visibleLightIndices[i];
+    }
+
+    // Write cell info
+    lightCells[tileIndex].offset = offset;
+    lightCells[tileIndex].count = visibleCount;
+}
+

@@ -1,0 +1,98 @@
+#version 460
+
+/**
+ * @file frustum_culling.comp
+ * @brief GPU frustum culling compute shader
+ *
+ * Tests each object's AABB against the camera frustum and sets
+ * instanceCount to 0 for culled objects.
+ *
+ * Based on iquilezles.org/articles/frustumcorrect/
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Frustum structure (6 planes + 8 corners)
+struct Frustum {
+    vec4 planes[6];   // ax + by + cz + d = 0 (normalized)
+    vec4 corners[8];  // World-space corners
+};
+
+// AABB structure
+struct AABB {
+    vec4 minPoint;  // xyz = min corner
+    vec4 maxPoint;  // xyz = max corner
+};
+
+// VkDrawIndirectCommand
+struct DrawIndirectCommand {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+};
+
+// Bindings
+layout(set = 0, binding = 0) uniform FrustumUBO {
+    Frustum frustum;
+};
+
+layout(set = 0, binding = 1) readonly buffer AABBBuffer {
+    AABB boxes[];
+};
+
+layout(set = 0, binding = 2) buffer CommandBuffer {
+    DrawIndirectCommand commands[];
+};
+
+// Test if AABB is inside or intersects frustum
+// Uses proper frustum-AABB test (not just plane tests)
+bool isBoxInFrustum(Frustum f, AABB box) {
+    // Test 1: Check if box is outside any frustum plane
+    for (int i = 0; i < 6; i++) {
+        int outside = 0;
+        
+        // Test all 8 corners against plane
+        outside += (dot(f.planes[i], vec4(box.minPoint.x, box.minPoint.y, box.minPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.maxPoint.x, box.minPoint.y, box.minPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.minPoint.x, box.maxPoint.y, box.minPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.maxPoint.x, box.maxPoint.y, box.minPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.minPoint.x, box.minPoint.y, box.maxPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.maxPoint.x, box.minPoint.y, box.maxPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.minPoint.x, box.maxPoint.y, box.maxPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        outside += (dot(f.planes[i], vec4(box.maxPoint.x, box.maxPoint.y, box.maxPoint.z, 1.0)) < 0.0) ? 1 : 0;
+        
+        // If all 8 corners are outside this plane, box is outside frustum
+        if (outside == 8) {
+            return false;
+        }
+    }
+
+    // Test 2: Check if frustum is outside box (reverse test)
+    // This catches cases where box fully contains frustum
+    int r = 0;
+    r = 0; for (int i = 0; i < 8; i++) r += (f.corners[i].x > box.maxPoint.x) ? 1 : 0; if (r == 8) return false;
+    r = 0; for (int i = 0; i < 8; i++) r += (f.corners[i].x < box.minPoint.x) ? 1 : 0; if (r == 8) return false;
+    r = 0; for (int i = 0; i < 8; i++) r += (f.corners[i].y > box.maxPoint.y) ? 1 : 0; if (r == 8) return false;
+    r = 0; for (int i = 0; i < 8; i++) r += (f.corners[i].y < box.minPoint.y) ? 1 : 0; if (r == 8) return false;
+    r = 0; for (int i = 0; i < 8; i++) r += (f.corners[i].z > box.maxPoint.z) ? 1 : 0; if (r == 8) return false;
+    r = 0; for (int i = 0; i < 8; i++) r += (f.corners[i].z < box.minPoint.z) ? 1 : 0; if (r == 8) return false;
+
+    return true;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Bounds check
+    if (idx >= commands.length()) {
+        return;
+    }
+
+    // Test AABB against frustum
+    if (isBoxInFrustum(frustum, boxes[idx])) {
+        commands[idx].instanceCount = 1;  // Visible
+    } else {
+        commands[idx].instanceCount = 0;  // Culled
+    }
+}

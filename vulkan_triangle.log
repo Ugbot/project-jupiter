@@ -1,0 +1,41 @@
+[2025-12-05 11:32:49.674] [INFO] [Legacy] Logging system initialized
+[2025-12-05 11:32:49.676] [INFO] [Main] ========================================
+[2025-12-05 11:32:49.676] [INFO] [Main]   Vulkan Triangle Demo
+[2025-12-05 11:32:49.676] [INFO] [Main]   Project Jupiter Engine
+[2025-12-05 11:32:49.676] [INFO] [Main] ========================================
+[2025-12-05 11:32:49.676] [INFO] [Application] Starting application: Vulkan Triangle Demo
+[2025-12-05 11:32:49.676] [INFO] [Application] Initializing SDL
+[2025-12-05 11:32:49.806] [INFO] [Application] Creating window (800x600)
+[2025-12-05 11:32:49.848] [INFO] [Application] Initializing Vulkan renderer
+[2025-12-05 11:32:49.848] [INFO] [Vulkan] Requesting 5 Vulkan extensions:
+[2025-12-05 11:32:49.848] [INFO] [Vulkan]   - VK_KHR_surface
+[2025-12-05 11:32:49.848] [INFO] [Vulkan]   - VK_EXT_metal_surface
+[2025-12-05 11:32:49.848] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-12-05 11:32:49.848] [INFO] [Vulkan]   - VK_KHR_portability_enumeration
+[2025-12-05 11:32:49.848] [INFO] [Vulkan]   - VK_KHR_get_physical_device_properties2
+[2025-12-05 11:32:49.850] [INFO] [Vulkan] Created Vulkan instance
+[2025-12-05 11:32:49.851] [INFO] [Vulkan] Selected GPU: Apple M3 Pro
+[2025-12-05 11:32:49.851] [INFO] [Vulkan] Enabling VK_KHR_buffer_device_address for GPU pointers
+[2025-12-05 11:32:49.851] [INFO] [Vulkan] Enabling VK_KHR_synchronization2 for modern barriers
+[2025-12-05 11:32:49.851] [INFO] [Vulkan] Enabling VK_EXT_descriptor_indexing for bindless textures
+[2025-12-05 11:32:49.856] [INFO] [Vulkan] Created logical device with modern Vulkan features
+[2025-12-05 11:32:49.856] [INFO] [Vulkan] VMA: Enabling buffer device address support
+[2025-12-05 11:32:49.856] [INFO] [Vulkan] Calling vmaCreateAllocator...
+[2025-12-05 11:32:49.856] [INFO] [Vulkan] Created VMA allocator
+[2025-12-05 11:32:49.856] [INFO] [Vulkan] Vulkan context initialized successfully
+[2025-12-05 11:32:49.856] [INFO] [Vulkan] Created swapchain with 3 images (800x600)
+[2025-12-05 11:32:49.857] [INFO] [Vulkan] Created depth buffer (800x600)
+[2025-12-05 11:32:49.857] [INFO] [Vulkan] Loaded pipeline cache from disk (36 bytes)
+[2025-12-05 11:32:49.857] [INFO] [Vulkan] Created pipeline cache
+[2025-12-05 11:32:49.858] [INFO] [Vulkan] Vulkan renderer initialized
+[2025-12-05 11:32:49.858] [INFO] [Application] Application initialized successfully
+[2025-12-05 11:32:49.858] [INFO] [Application] Calling onInit()
+[2025-12-05 11:32:49.858] [INFO] [TriangleApp] Initializing triangle demo
+[2025-12-05 11:32:49.858] [INFO] [Application] Created vertex buffer (3 vertices)
+[2025-12-05 11:32:49.858] [INFO] [Application] Created index buffer (3 indices)
+[2025-12-05 11:32:49.858] [INFO] [Application] Loading shaders: shaders/triangle.vert.spv, shaders/triangle.frag.spv
+[2025-12-05 11:32:49.858] [ERROR] [Vulkan] Failed to find shader file: shaders/triangle.vert.spv
+[2025-12-05 11:32:49.858] [ERROR] [Vulkan] Failed to load vertex shader: shaders/triangle.vert.spv
+[2025-12-05 11:32:49.858] [ERROR] [Application] Failed to create pipeline
+[2025-12-05 11:32:49.858] [ERROR] [TriangleApp] Failed to load shaders
+[2025-12-05 11:32:49.858] [INFO] [Application] Entering main loop

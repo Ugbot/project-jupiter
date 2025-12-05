@@ -17,25 +17,14 @@
 #include <memory>
 #include <functional>
 
+// Include asset database types first
+#include "assets/asset_database.h"
+
 namespace jupiter {
 namespace assets {
 
 // Forward declarations
 class AssetManager;
-
-/**
- * @brief Asset types supported by the system
- */
-enum class AssetType {
-    UNKNOWN,
-    TEXTURE,
-    MESH,
-    SHADER,
-    AUDIO,
-    CONFIG,
-    SCRIPT,
-    FONT
-};
 
 /**
  * @brief Asset loading configuration
@@ -261,3 +250,7 @@ ASSETS_API AssetManager& getAssetManager();
 
 } // namespace assets
 } // namespace jupiter
+
+// Include additional asset system components
+#include "assets/file_watcher.h"
+#include "assets/shader_loader.h"

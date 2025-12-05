@@ -18,7 +18,77 @@ This directory contains vendored third-party dependencies that are built as stat
 
 ## Current Dependencies
 
-*(To be added as needed)*
+### SDL3 (Simple DirectMedia Layer)
+- **Version**: 3.x (main branch)
+- **Purpose**: Platform abstraction (windowing, audio, input, threading)
+- **License**: zlib License
+- **URL**: https://github.com/libsdl-org/SDL
+- **Status**: Active - Primary platform abstraction layer
+- **Replaces**: GLFW (windowing only)
+
+### GLFW (Graphics Library Framework)
+- **Version**: 3.x
+- **Purpose**: Windowing (legacy, being replaced by SDL3)
+- **License**: zlib License
+- **Status**: ⚠️ DEPRECATED - Will be removed after SDL3 migration complete
+- **Migration**: See SDL_MIGRATION_GUIDE.md
+
+### Vulkan SDK
+- **Purpose**: Graphics API headers and validation layers
+- **License**: Apache 2.0
+- **Status**: Active - Used alongside SDL3 for rendering
+- **Note**: Includes MoltenVK for macOS support
+
+### SQLite
+- **Version**: 3.48.0 (amalgamation)
+- **Purpose**: Asset database for metadata and dependency tracking
+- **License**: Public Domain
+- **URL**: https://www.sqlite.org/
+- **Status**: Active - Asset management system
+
+### stb_image
+- **Purpose**: Single-header image loading library
+- **License**: Public Domain (MIT)
+- **URL**: https://github.com/nothings/stb
+- **Status**: Active - Texture loading
+
+### tinygltf
+- **Purpose**: GLTF 2.0 mesh/scene loader
+- **License**: MIT
+- **URL**: https://github.com/syoyo/tinygltf
+- **Status**: Active - GLTF mesh loading
+
+### Assimp
+- **Purpose**: Comprehensive 3D asset importer
+- **License**: BSD
+- **URL**: https://github.com/assimp/assimp
+- **Status**: Active - Supports OBJ, FBX, COLLADA, etc.
+
+## Reference-Only Dependencies
+
+These dependencies are included for reference and study purposes but are **NOT** compiled into the engine:
+
+### librg (REFERENCE ONLY)
+- **Version**: Latest from main branch
+- **Purpose**: Reference for netcode architecture (entity replication, interest management)
+- **License**: Apache 2.0
+- **URL**: https://github.com/zpl-c/librg
+- **Status**: 📚 REFERENCE ONLY - Not built or linked
+- **Note**: Monolithic C approach - we're building a better C++ solution following CLAUDE.md principles
+
+### Vulkan-glTF-PBR (REFERENCE ONLY)
+- **Version**: Latest from master branch
+- **Purpose**: Reference implementation for PBR rendering with glTF 2.0
+- **License**: MIT
+- **URL**: https://github.com/SaschaWillems/Vulkan-glTF-PBR
+- **Status**: 📚 REFERENCE ONLY - Not built or linked
+- **Note**: Production-quality PBR shader implementation by Sascha Willems
+- **Features**:
+  - Complete Cook-Torrance BRDF
+  - Image-based lighting (IBL)
+  - HDR environment maps
+  - Proper tangent-space normal mapping
+  - Reference for debugging lighting issues
 
 ## Build Requirements
 

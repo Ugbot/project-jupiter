@@ -51,6 +51,9 @@ struct RENDERING_API WindowConfig {
 
 /**
  * @brief Window class for cross-platform window management
+ *
+ * This class wraps the platform::Window interface and provides
+ * Vulkan-specific functionality for surface creation.
  */
 class RENDERING_API Window {
 public:
@@ -62,10 +65,10 @@ public:
 
     bool shouldClose() const;
     void pollEvents();
+    void requestClose();
 
     uint32_t getWidth() const;
     uint32_t getHeight() const;
-    GLFWwindow* getGLFWwindow() { return m_window; }
 
     // Vulkan surface creation
     VkResult createVulkanSurface(VkInstance instance, VkSurfaceKHR* surface) const;
@@ -73,8 +76,11 @@ public:
     // Get required Vulkan extensions
     std::vector<const char*> getRequiredExtensions() const;
 
+    // Get the underlying platform window
+    platform::Window* getPlatformWindow() const { return m_window.get(); }
+
 private:
-    GLFWwindow* m_window;
+    std::unique_ptr<platform::Window> m_window;
     WindowConfig m_config;
 };
 

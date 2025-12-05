@@ -165,3 +165,5 @@ module_name/
 
 **Remember**: Correctness first, then performance. But design for performance from the start.
 - save all plans into docs so we dont loose them. check them as we go and update/check off things
+- run visual tests for at least 10 seconds after they finish loadign because otherwise its not really a test
+- the game engine has to run headless so none of the core systems can depend on the renderer.

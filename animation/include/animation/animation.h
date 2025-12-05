@@ -1,16 +1,6 @@
 #pragma once
 
-#ifdef _WIN32
-    #ifdef ANIMATION_EXPORTS
-        #define ANIMATION_API __declspec(dllexport)
-    #elif defined(ANIMATION_IMPORTS)
-        #define ANIMATION_API __declspec(dllimport)
-    #else
-        #define ANIMATION_API
-    #endif
-#else
-    #define ANIMATION_API
-#endif
+#include "animation/animation_export.h"
 
 namespace jupiter {
 namespace animation {
@@ -34,3 +24,7 @@ ANIMATION_API void update(float deltaTime);
 
 } // namespace animation
 } // namespace jupiter
+
+// Include animation system headers
+#include "animation/skeleton.h"
+#include "animation/animation_clip.h"

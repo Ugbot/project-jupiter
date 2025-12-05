@@ -19,7 +19,7 @@ using namespace jupiter::rendering;
 class TriangleApplication : public Application {
 public:
     TriangleApplication()
-        : Application("Vulkan Triangle Demo", 800, 600, true)  // true = enable validation
+        : Application("Vulkan Triangle Demo", 800, 600, false)  // false = disable validation for now
         , vertexBuffer_(nullptr)
         , indexBuffer_(nullptr)
         , indexCount_(0) {
@@ -57,8 +57,8 @@ protected:
             return;
         }
 
-        // Load shaders (automatic search in ./shaders/, ../shaders/, etc.)
-        if (!loadShaders("triangle.vert.spv", "triangle.frag.spv")) {
+        // Load shaders from shaders/ directory
+        if (!loadShaders("shaders/triangle.vert.spv", "shaders/triangle.frag.spv")) {
             LOG_ERROR("TriangleApp", "Failed to load shaders");
             return;
         }

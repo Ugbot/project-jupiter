@@ -1,11 +1,23 @@
 add_library(platform
     src/platform.cpp
+    src/sdl_wrapper.cpp
+    src/window_sdl.cpp
 )
 
 target_include_directories(platform
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+        # Include vendored Vulkan headers for SDL_vulkan.h support
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/base>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external/vulkan>
+)
+
+# Link against SDL3 static library
+target_link_libraries(platform
+    PUBLIC
+        SDL3::SDL3-static
 )
 
 # Platform-specific includes and libraries
