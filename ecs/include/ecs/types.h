@@ -81,7 +81,12 @@ enum class ColumnId : uint32_t {
     // Entity metadata
     Ids             = 1u << 24,
     Flags           = 1u << 25,
-    
+
+    // Voxel columns
+    ChunkPoolIndex    = 1u << 26,  // Index into VoxelWorld ChunkPool
+    VoxelLodLevel     = 1u << 27,  // LOD state (0=full, 1=half, 2=distant, 255=unloaded)
+    NetworkDirtyBits  = 1u << 28,  // Edit tracking for netcode delta sync
+
     // All columns mask
     All             = 0xFFFFFFFF
 };
@@ -115,6 +120,7 @@ enum class EntityFlags : uint32_t {
     Active      = 1u << 3,   // Entity is active
     Collidable  = 1u << 4,   // Participates in collision
     Replicated  = 1u << 5,   // Networked entity
+    VoxelChunk  = 1u << 6,   // Entity is a voxel chunk (has voxel-specific columns)
     Static      = 1u << 16,  // Infinite mass physics body
 };
 

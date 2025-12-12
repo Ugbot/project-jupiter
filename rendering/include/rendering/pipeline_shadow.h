@@ -19,10 +19,21 @@ class SceneManager;
 class VulkanMesh;
 
 /**
- * @brief Push constants for shadow pass
+ * @brief Push constants for shadow pass (standard geometry)
  */
 struct ShadowPushConstants {
     alignas(16) glm::mat4 model;  // Model matrix
+};
+
+/**
+ * @brief Push constants for voxel shadow pass
+ *
+ * Voxel chunks use offset + scale instead of full model matrix.
+ * Matches VoxelChunkPushConstant in depth_voxel.vert shader.
+ */
+struct VoxelShadowPushConstants {
+    alignas(16) glm::vec4 chunkOffset;  // xyz = world offset, w = unused
+    alignas(16) glm::vec4 scale;        // xyz = stb scale, w = unused
 };
 
 /**
@@ -86,12 +97,17 @@ private:
     void createDescriptorPool();
     void createDescriptorSets();
     void createPipeline();
+    void createVoxelPipeline();
 
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     ResourcesShadow* resourcesShadow_ = nullptr;
     SceneManager* sceneManager_ = nullptr;
 
     std::vector<VkDescriptorSet> shadowDescriptorSets_;
+
+    // Voxel pipeline (uses VoxelVertexGPU format + VoxelShadowPushConstants)
+    VkPipeline voxelPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout voxelPipelineLayout_ = VK_NULL_HANDLE;
 };
 
 } // namespace jupiter::rendering

@@ -80,6 +80,13 @@ struct EntityBuffer {
     Column<uint32_t> visibility;
 
     // ========================================================================
+    // Voxel Columns (for entities with VoxelChunk flag)
+    // ========================================================================
+    Column<uint32_t> chunkPoolIndices;    // Index into VoxelWorld ChunkPool
+    Column<uint8_t> voxelLodLevels;       // LOD level (0=full, 1=near, 2=far, 255=unloaded)
+    Column<uint32_t> networkDirtyBits;    // Edit tracking for netcode delta sync
+
+    // ========================================================================
     // Lifecycle
     // ========================================================================
 
@@ -123,6 +130,10 @@ struct EntityBuffer {
         materialIds.reserve(cap);
         meshIds.reserve(cap);
         visibility.reserve(cap);
+
+        chunkPoolIndices.reserve(cap);
+        voxelLodLevels.reserve(cap);
+        networkDirtyBits.reserve(cap);
     }
 
     /**
@@ -162,6 +173,10 @@ struct EntityBuffer {
         materialIds.resize(newCount);
         meshIds.resize(newCount);
         visibility.resize(newCount);
+
+        chunkPoolIndices.resize(newCount);
+        voxelLodLevels.resize(newCount);
+        networkDirtyBits.resize(newCount);
     }
 
     /**
@@ -201,6 +216,10 @@ struct EntityBuffer {
         materialIds.clear();
         meshIds.clear();
         visibility.clear();
+
+        chunkPoolIndices.clear();
+        voxelLodLevels.clear();
+        networkDirtyBits.clear();
     }
 
     /**
@@ -233,6 +252,9 @@ struct EntityBuffer {
             case ColumnId::MaterialIds: materialIds = src.materialIds; break;
             case ColumnId::MeshIds: meshIds = src.meshIds; break;
             case ColumnId::Visibility: visibility = src.visibility; break;
+            case ColumnId::ChunkPoolIndex: chunkPoolIndices = src.chunkPoolIndices; break;
+            case ColumnId::VoxelLodLevel: voxelLodLevels = src.voxelLodLevels; break;
+            case ColumnId::NetworkDirtyBits: networkDirtyBits = src.networkDirtyBits; break;
             default: break;
         }
     }

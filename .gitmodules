@@ -19,3 +19,6 @@
 [submodule "vendored/oryol"]
 	path = vendored/oryol
 	url = https://github.com/floooh/oryol
+[submodule "vendored/tracy"]
+	path = vendored/tracy
+	url = https://github.com/wolfpld/tracy

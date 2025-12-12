@@ -32,6 +32,12 @@ struct Renderable {
     bool visible = true;
     uint32_t layerMask = 1;         // Render layer (for filtering)
 
+    // Voxel-specific fields (valid when isVoxel() returns true)
+    glm::vec3 chunkOffset{0.0f};    // World position of chunk origin
+    glm::vec3 voxelScale{1.0f};     // stb_voxel_render transform scale
+    uint8_t voxelLod = 0;           // LOD level (0=Vertex3DLit, 2+=VoxelVertexGPU)
+    bool isVoxelChunk = false;      // True if this is a voxel chunk
+
     Renderable() = default;
 
     Renderable(VulkanMesh* m, Material* mat, const glm::mat4& t = glm::mat4(1.0f))
@@ -39,6 +45,24 @@ struct Renderable {
 
     bool isValid() const {
         return mesh && mesh->isValid() && material && material->isValid();
+    }
+
+    /**
+     * @brief Check if this is a voxel chunk renderable
+     *
+     * Voxel chunks with LOD >= 2 use compact VoxelVertexGPU format,
+     * while LOD 0-1 use standard Vertex3DLit format.
+     */
+    bool isVoxel() const { return isVoxelChunk; }
+
+    /**
+     * @brief Check if this voxel uses compact format (for LOD 2+)
+     *
+     * Returns true if this voxel should use the voxel shader pipeline
+     * instead of the standard PBR pipeline.
+     */
+    bool usesCompactVoxelFormat() const {
+        return isVoxelChunk && voxelLod >= 2;
     }
 };
 
