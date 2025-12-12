@@ -14,8 +14,7 @@
 #include "platform/platform.h"
 
 #include <voxel/vis_tree.h>
-#include <voxel/voxel_mesher.h>
-#include <voxel/mesh_buffer_pool.h>
+#include <voxel/voxel_job_system.h>
 
 #include "vulkan_backend.h"
 
@@ -102,8 +101,8 @@ protected:
         treeConfig.displayWidth = getWidth();
         treeConfig.fov = PI / 3.0f;
         treeConfig.screenSpaceThreshold = 8.0f;  // Lower = more detail
-        treeConfig.chunkSize = 32;
-        treeConfig.maxLevels = 7;  // 0-7 = 8 levels (max 32*128=4096 unit chunks, ~3x distance)
+        treeConfig.chunkSize = CHUNK_SIZE;  // Must match voxel grid resolution (16)
+        treeConfig.maxLevels = 8;  // 0-8 = 9 levels (max 16*256=4096 unit chunks)
         treeConfig.maxNodes = 8192;  // More nodes for larger world
         treeConfig.maxJobsPerFrame = 24;  // Process more jobs
 
@@ -111,16 +110,14 @@ protected:
         LOG_INFO("VoxelLOD", "VisTree initialized (%d levels, threshold %.0f px)",
                  treeConfig.maxLevels, treeConfig.screenSpaceThreshold);
 
-        // Initialize mesh buffer pool
-        meshBufferPool_ = std::make_unique<MeshBufferPool>();
-        meshBufferPool_->initialize(16);
-
-        // Initialize mesher
-        mesher_ = std::make_unique<VoxelMesher>();
-        mesher_->initialize();
-
-        // Allocate voxel data buffer
-        voxelData_ = std::make_unique<uint8_t[]>(PADDED_SIZE * PADDED_SIZE * PADDED_SIZE);
+        // Initialize async job system (replaces single-threaded mesher)
+        jobSystem_ = std::make_unique<VoxelJobSystem>();
+        if (!jobSystem_->initialize(0, 12345)) {  // 0 = auto-detect worker count
+            LOG_ERROR("VoxelLOD", "Failed to initialize job system!");
+            return;
+        }
+        LOG_INFO("VoxelLOD", "Job system initialized with %u worker threads",
+                 jobSystem_->getWorkerCount());
 
         LOG_INFO("VoxelLOD", "");
         LOG_INFO("VoxelLOD", "Controls:");
@@ -156,106 +153,70 @@ protected:
         }
         freedSlots.clear();
 
-        // Process geometry generation jobs
+        // Submit new geometry generation jobs to async workers
         auto& jobs = visTree_.getGeomGenJobs();
-        int jobsProcessed = 0;
-        const int maxJobsPerFrame = 8;  // Process more jobs per frame
+        int jobsSubmitted = 0;
 
-        // Sort jobs by distance to camera (closest first) - do this periodically
-        static int sortCounter = 0;
-        if (!jobs.empty() && ++sortCounter % 30 == 0) {
-            std::sort(jobs.begin(), jobs.end(),
-                [camX = cameraPos_.x, camZ = cameraPos_.z](const GeomGenJob& a, const GeomGenJob& b) {
-                    float aCx = (a.bounds.x0 + a.bounds.x1) * 0.5f;
-                    float aCz = (a.bounds.z0 + a.bounds.z1) * 0.5f;
-                    float bCx = (b.bounds.x0 + b.bounds.x1) * 0.5f;
-                    float bCz = (b.bounds.z0 + b.bounds.z1) * 0.5f;
-                    float distA = (aCx - camX) * (aCx - camX) + (aCz - camZ) * (aCz - camZ);
-                    float distB = (bCx - camX) * (bCx - camX) + (bCz - camZ) * (bCz - camZ);
-                    return distA > distB;  // Sort descending so closest are at back (pop_back)
-                });
-        }
-
-        // Debug: log job quadrant distribution once
-        static bool jobsLogged = false;
-        if (!jobsLogged && jobs.size() > 4) {
-            int negNeg = 0, negPos = 0, posNeg = 0, posPos = 0;
-            for (const auto& j : jobs) {
-                float cx = (j.bounds.x0 + j.bounds.x1) * 0.5f;
-                float cz = (j.bounds.z0 + j.bounds.z1) * 0.5f;
-                if (cx < 0 && cz < 0) negNeg++;
-                else if (cx < 0 && cz >= 0) negPos++;
-                else if (cx >= 0 && cz < 0) posNeg++;
-                else posPos++;
-            }
-            LOG_INFO("VoxelLOD", "Job quadrants: --=%d, -+=%d, +-=%d, ++=%d (total %zu)",
-                     negNeg, negPos, posNeg, posPos, jobs.size());
-            jobsLogged = true;
-        }
-
-        while (jobsProcessed < maxJobsPerFrame && !jobs.empty()) {
+        while (!jobs.empty()) {
             GeomGenJob job = jobs.back();
             jobs.pop_back();
 
-            // Generate voxel data for this LOD level
-            generateLODTerrain(job.bounds, job.level);
-
-            // Mesh the voxel data
-            MeshBuffer* buffer = meshBufferPool_->acquire();
-            if (!buffer) continue;
-
-            mesher_->setBuffer(buffer);
-
-            // Create temp chunk data from our voxel buffer
-            ChunkVoxelData tempChunk;
-            std::memcpy(tempChunk.blocks, voxelData_.get(),
-                       PADDED_SIZE * PADDED_SIZE * PADDED_SIZE);
-
-            ChunkCoord dummyCoord{0, 0, 0};
-            const ChunkVoxelData* neighbors[6] = {nullptr};
-            mesher_->beginChunk(&tempChunk, neighbors, dummyCoord);
-
-            MeshResult result = mesher_->meshify();
-
-            meshBufferPool_->release(buffer);
-
-            if (result.numVertices > 0) {
-                // Find free GPU slot
-                uint32_t gpuSlot = UINT32_MAX;
-                for (uint32_t i = 0; i < PipelineVoxel::MAX_CHUNKS; ++i) {
-                    if (!slotUsed_[i]) {
-                        gpuSlot = i;
-                        slotUsed_[i] = true;
-                        break;
-                    }
-                }
-
-                if (gpuSlot != UINT32_MAX) {
-                    // Upload to GPU
-                    const void* vertices = mesher_->getStbVertexBuffer();
-                    size_t dataSize = result.numVertices * 8;
-
-                    bool uploaded = voxelPipeline_->uploadChunkMesh(
-                        gpuSlot,
-                        vertices,
-                        dataSize,
-                        job.translate,
-                        job.scale
-                    );
-
-                    if (uploaded) {
-                        visTree_.applyGeom(job.nodeIndex, static_cast<int16_t>(gpuSlot),
-                                          result.numVertices, false);
-                        totalVertices_ += result.numVertices;
-                    }
+            // Find free GPU slot (pre-allocate before submitting to worker)
+            uint32_t gpuSlot = UINT32_MAX;
+            for (uint32_t i = 0; i < PipelineVoxel::MAX_CHUNKS; ++i) {
+                if (!slotUsed_[i]) {
+                    gpuSlot = i;
+                    slotUsed_[i] = true;  // Reserve slot
+                    break;
                 }
             }
-            else {
-                // Empty volume
-                visTree_.applyGeom(job.nodeIndex, -1, 0, true);
+
+            if (gpuSlot == UINT32_MAX) {
+                // No GPU slots available, put job back
+                jobs.push_back(job);
+                break;
             }
 
-            jobsProcessed++;
+            // Submit to async job system
+            if (jobSystem_->submitJob(job, static_cast<int16_t>(gpuSlot))) {
+                jobsSubmitted++;
+            } else {
+                // Ring buffer full, release slot and put job back
+                slotUsed_[gpuSlot] = false;
+                jobs.push_back(job);
+                break;
+            }
+        }
+
+        // Poll completed meshes and upload to GPU
+        CompletedMesh completed;
+        int uploadsThisFrame = 0;
+        const int maxUploadsPerFrame = 64;  // Limit uploads per frame to avoid stalls
+
+        while (uploadsThisFrame < maxUploadsPerFrame && jobSystem_->pollCompleted(completed)) {
+            if (completed.numVertices > 0 && !completed.meshData.empty()) {
+                // Upload to GPU
+                bool uploaded = voxelPipeline_->uploadChunkMesh(
+                    completed.gpuSlot,
+                    completed.meshData.data(),
+                    completed.meshData.size(),
+                    completed.translate,
+                    completed.scale
+                );
+
+                if (uploaded) {
+                    visTree_.applyGeom(completed.nodeIndex, completed.gpuSlot,
+                                      completed.numVertices, false);
+                    totalVertices_ += completed.numVertices;
+                }
+            } else {
+                // Empty volume - release pre-allocated GPU slot
+                if (completed.gpuSlot >= 0 && completed.gpuSlot < static_cast<int16_t>(PipelineVoxel::MAX_CHUNKS)) {
+                    slotUsed_[completed.gpuSlot] = false;
+                }
+                visTree_.applyGeom(completed.nodeIndex, -1, 0, true);
+            }
+            uploadsThisFrame++;
         }
 
         // Update stats
@@ -286,8 +247,12 @@ protected:
 
         // Log stats periodically
         if (frameCount_ % 120 == 0) {
-            LOG_DEBUG("VoxelLOD", "Draw: %d nodes, Pending: %d jobs, Vertices: %u",
-                     visTree_.getDrawCount(), visTree_.getPendingJobCount(), totalVertices_);
+            LOG_DEBUG("VoxelLOD", "Draw: %d, Pending: %llu async + %d tree, Completed: %llu, Vertices: %u",
+                     visTree_.getDrawCount(),
+                     jobSystem_->getPendingCount(),
+                     visTree_.getPendingJobCount(),
+                     jobSystem_->getCompletedCount(),
+                     totalVertices_);
         }
     }
 
@@ -354,9 +319,11 @@ protected:
 
     void onShutdown() override {
         LOG_INFO("VoxelLOD", "Shutting down...");
+        if (jobSystem_) {
+            jobSystem_->shutdown();
+            LOG_INFO("VoxelLOD", "Job system shutdown complete");
+        }
         visTree_.shutdown();
-        mesher_->shutdown();
-        meshBufferPool_->shutdown();
         voxelPipeline_.reset();
     }
 
@@ -377,80 +344,6 @@ private:
         );
     }
 
-    /**
-     * @brief Generate terrain for a LOD region
-     *
-     * @param bounds World bounds for this node
-     * @param level LOD level (0 = most detailed)
-     */
-    void generateLODTerrain(const VisBounds& bounds, int level) {
-        // Clear voxel data
-        std::memset(voxelData_.get(), 0, PADDED_SIZE * PADDED_SIZE * PADDED_SIZE);
-
-        // Calculate world-to-voxel scale
-        const float boundsWidth = static_cast<float>(bounds.x1 - bounds.x0);
-        const float boundsDepth = static_cast<float>(bounds.z1 - bounds.z0);
-        const float voxelSizeX = boundsWidth / CHUNK_SIZE;
-        const float voxelSizeZ = boundsDepth / CHUNK_SIZE;
-
-        const float noiseScale = 0.005f;  // Larger features
-        const float amplitude = 120.0f;   // Much taller hills (was 40)
-        const float baseHeight = 20.0f;   // Lower base to allow valleys
-
-        // Generate terrain using multi-octave simplex noise
-        for (int lx = 0; lx < PADDED_SIZE; ++lx) {
-            for (int lz = 0; lz < PADDED_SIZE; ++lz) {
-                // World coordinates
-                float wx = bounds.x0 + (lx - CHUNK_BORDER) * voxelSizeX;
-                float wz = bounds.z0 + (lz - CHUNK_BORDER) * voxelSizeZ;
-
-                // Multi-octave simplex noise with more variation
-                glm::vec2 p(wx * noiseScale, wz * noiseScale);
-
-                // Large rolling hills
-                float n = glm::simplex(p * 0.3f) * 1.0f;
-                // Medium features
-                n += glm::simplex(p * 0.7f) * 0.6f;
-                // Small hills
-                n += glm::simplex(p * 1.5f) * 0.35f;
-                // Fine detail
-                n += glm::simplex(p * 3.0f) * 0.2f;
-                // Very fine detail
-                n += glm::simplex(p * 6.0f) * 0.1f;
-
-                // Ridge noise for more dramatic terrain
-                float ridge = 1.0f - std::abs(glm::simplex(p * 0.5f + glm::vec2(100.0f)));
-                ridge = ridge * ridge;  // Sharpen ridges
-                n += ridge * 0.4f;
-
-                // Normalize to roughly 0-1
-                n = n * 0.35f + 0.5f;
-                n = std::clamp(n, 0.0f, 1.0f);
-
-                int height = static_cast<int>(baseHeight + n * amplitude);
-                height = std::clamp(height, 1, static_cast<int>(CHUNK_SIZE) - 1);
-
-                // Fill column
-                for (int ly = 0; ly < PADDED_SIZE; ++ly) {
-                    int worldY = ly - CHUNK_BORDER;
-
-                    uint8_t block = 0;  // Air
-                    if (worldY < height - 3) {
-                        block = 1;  // Stone
-                    } else if (worldY < height - 1) {
-                        block = 2;  // Dirt
-                    } else if (worldY < height) {
-                        block = 3;  // Grass
-                    }
-
-                    // Index: z varies fastest (stride 1), then y (stride 18), then x (stride 324)
-                    int idx = lx * PADDED_SIZE * PADDED_SIZE + ly * PADDED_SIZE + lz;
-                    voxelData_[idx] = block;
-                }
-            }
-        }
-    }
-
     // Camera
     PerspectiveCamera* camera_ = nullptr;
     glm::vec3 cameraPos_;
@@ -463,9 +356,7 @@ private:
 
     // LOD system
     VisTree visTree_;
-    std::unique_ptr<VoxelMesher> mesher_;
-    std::unique_ptr<MeshBufferPool> meshBufferPool_;
-    std::unique_ptr<uint8_t[]> voxelData_;
+    std::unique_ptr<VoxelJobSystem> jobSystem_;
 
     // GPU slot tracking
     std::array<bool, PipelineVoxel::MAX_CHUNKS> slotUsed_{};

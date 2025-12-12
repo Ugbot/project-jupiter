@@ -9,6 +9,7 @@ add_library(jupiter_voxel STATIC
     src/mesh_buffer_pool.cpp
     src/streaming_manager.cpp
     src/vis_tree.cpp
+    src/voxel_job_system.cpp
     src/voxel_mesher.cpp
     src/voxel_mesh_converter.cpp
     src/voxel_physics_mesh.cpp
@@ -49,11 +50,15 @@ target_include_directories(jupiter_voxel
         ${CMAKE_CURRENT_SOURCE_DIR}/../vendored/stb
 )
 
+# Find threading library
+find_package(Threads REQUIRED)
+
 # Link dependencies
 target_link_libraries(jupiter_voxel
     PUBLIC
         memory
         jupiter_ecs
+        Threads::Threads
     PRIVATE
         logging
 )
