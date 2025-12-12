@@ -4,11 +4,14 @@
 add_library(jupiter_voxel STATIC
     src/chunk_pool.cpp
     src/chunk_map.cpp
+    src/chunk_entity_bridge.cpp
     src/dirty_queue.cpp
     src/mesh_buffer_pool.cpp
     src/streaming_manager.cpp
+    src/vis_tree.cpp
     src/voxel_mesher.cpp
     src/voxel_mesh_converter.cpp
+    src/voxel_physics_mesh.cpp
     src/voxel_world.cpp
 )
 
@@ -25,13 +28,19 @@ target_include_directories(jupiter_voxel
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/glm>
 )
 
-# Rendering module for vertex formats
+# Rendering module for vertex formats and chunk_mesh_pool
 target_include_directories(jupiter_voxel
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../rendering/include>
-        # Vulkan headers (needed for vertex_formats.h)
+        # Assets module (needed by vulkan_mesh.h)
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../assets/include>
+        # Vulkan headers (needed for vertex_formats.h, chunk_mesh_pool.h)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored/vulkan/external/vulkan>
+        # VMA (Vulkan Memory Allocator) for VmaAllocator
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../vendored>
+        # ECS module for entity buffer and types
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../ecs/include>
 )
 
 # stb_voxel_render.h location (from oryol-samples)
@@ -44,6 +53,7 @@ target_include_directories(jupiter_voxel
 target_link_libraries(jupiter_voxel
     PUBLIC
         memory
+        jupiter_ecs
     PRIVATE
         logging
 )
