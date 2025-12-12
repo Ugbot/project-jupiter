@@ -38,9 +38,9 @@ class VoxelLODDemo : public Application {
 public:
     VoxelLODDemo()
         : Application("Voxel LOD Demo", 1920, 1080, false)
-        , cameraPos_(0.0f, 150.0f, 0.0f)  // Start above origin looking down at terrain
+        , cameraPos_(0.0f, 200.0f, 0.0f)  // Start above origin, high enough for tall hills
         , cameraYaw_(0.0f)   // Looking forward (+Z direction)
-        , cameraPitch_(-0.6f)  // Looking down at terrain
+        , cameraPitch_(-0.3f)  // Slight downward angle to see terrain + horizon
     {
     }
 
@@ -62,7 +62,7 @@ protected:
             PI / 3.0f,
             static_cast<float>(getWidth()) / getHeight(),
             0.5f,
-            2000.0f  // Very far view distance for LOD
+            6000.0f  // Triple draw distance for LOD
         );
         setActiveCamera(camera_);
         updateCameraTransform();
@@ -103,9 +103,9 @@ protected:
         treeConfig.fov = PI / 3.0f;
         treeConfig.screenSpaceThreshold = 8.0f;  // Lower = more detail
         treeConfig.chunkSize = 32;
-        treeConfig.maxLevels = 5;  // 0-5 = 6 levels (max 32*32=1024 unit chunks)
-        treeConfig.maxNodes = 4096;
-        treeConfig.maxJobsPerFrame = 16;
+        treeConfig.maxLevels = 7;  // 0-7 = 8 levels (max 32*128=4096 unit chunks, ~3x distance)
+        treeConfig.maxNodes = 8192;  // More nodes for larger world
+        treeConfig.maxJobsPerFrame = 24;  // Process more jobs
 
         visTree_.initialize(treeConfig);
         LOG_INFO("VoxelLOD", "VisTree initialized (%d levels, threshold %.0f px)",
@@ -274,7 +274,7 @@ protected:
         cameraUBO.projection = camera_->getProjectionMatrix().get();
         cameraUBO.viewProjection = cameraUBO.projection * cameraUBO.view;
         cameraUBO.cameraPosition = glm::vec4(cameraPos_, 1.0f);
-        cameraUBO.nearFarFov = glm::vec4(0.5f, 2000.0f, PI / 3.0f,
+        cameraUBO.nearFarFov = glm::vec4(0.5f, 6000.0f, PI / 3.0f,
                                          static_cast<float>(getWidth()) / getHeight());
 
         uint32_t frameIndex = renderer->getCurrentFrameIndex();
@@ -393,26 +393,42 @@ private:
         const float voxelSizeX = boundsWidth / CHUNK_SIZE;
         const float voxelSizeZ = boundsDepth / CHUNK_SIZE;
 
-        const float noiseScale = 0.01f;
-        const float amplitude = 40.0f;
-        const float baseHeight = 32.0f;
+        const float noiseScale = 0.005f;  // Larger features
+        const float amplitude = 120.0f;   // Much taller hills (was 40)
+        const float baseHeight = 20.0f;   // Lower base to allow valleys
 
-        // Generate terrain using simplex noise
+        // Generate terrain using multi-octave simplex noise
         for (int lx = 0; lx < PADDED_SIZE; ++lx) {
             for (int lz = 0; lz < PADDED_SIZE; ++lz) {
                 // World coordinates
                 float wx = bounds.x0 + (lx - CHUNK_BORDER) * voxelSizeX;
                 float wz = bounds.z0 + (lz - CHUNK_BORDER) * voxelSizeZ;
 
-                // Multi-octave simplex noise
+                // Multi-octave simplex noise with more variation
                 glm::vec2 p(wx * noiseScale, wz * noiseScale);
-                float n = glm::simplex(p * 0.5f) * 1.0f;
-                n += glm::simplex(p * 2.0f) * 0.5f;
-                n += glm::simplex(p * 4.0f) * 0.25f;
-                n = n * 0.5f + 0.5f;  // Normalize to 0-1
+
+                // Large rolling hills
+                float n = glm::simplex(p * 0.3f) * 1.0f;
+                // Medium features
+                n += glm::simplex(p * 0.7f) * 0.6f;
+                // Small hills
+                n += glm::simplex(p * 1.5f) * 0.35f;
+                // Fine detail
+                n += glm::simplex(p * 3.0f) * 0.2f;
+                // Very fine detail
+                n += glm::simplex(p * 6.0f) * 0.1f;
+
+                // Ridge noise for more dramatic terrain
+                float ridge = 1.0f - std::abs(glm::simplex(p * 0.5f + glm::vec2(100.0f)));
+                ridge = ridge * ridge;  // Sharpen ridges
+                n += ridge * 0.4f;
+
+                // Normalize to roughly 0-1
+                n = n * 0.35f + 0.5f;
+                n = std::clamp(n, 0.0f, 1.0f);
 
                 int height = static_cast<int>(baseHeight + n * amplitude);
-                height = std::clamp(height, 0, static_cast<int>(CHUNK_SIZE) - 1);
+                height = std::clamp(height, 1, static_cast<int>(CHUNK_SIZE) - 1);
 
                 // Fill column
                 for (int ly = 0; ly < PADDED_SIZE; ++ly) {

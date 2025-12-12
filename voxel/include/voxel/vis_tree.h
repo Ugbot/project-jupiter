@@ -70,11 +70,11 @@ struct VisTreeConfig {
  */
 class VisTree {
 public:
-    /// Maximum nodes
-    static constexpr int MaxNodes = 4096;
+    /// Maximum nodes (increased for larger draw distance)
+    static constexpr int MaxNodes = 8192;
 
     /// Maximum LOD levels
-    static constexpr int MaxLevels = 8;
+    static constexpr int MaxLevels = 10;
 
     VisTree() = default;
     ~VisTree() = default;
