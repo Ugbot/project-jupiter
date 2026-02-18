@@ -39,8 +39,8 @@ float ShadowPCF(
     for (int x = -pcfRange; x <= pcfRange; x++) {
         for (int y = -pcfRange; y <= pcfRange; y++) {
             vec2 offset = vec2(dx * float(x), dy * float(y));
-            float sample = texture(shadowMap, vec3(shadowCoord.xy + offset, shadowCoord.z - bias));
-            shadow += mix(SHADOW_AMBIENT, 1.0, sample);
+            float shadowSample = texture(shadowMap, vec3(shadowCoord.xy + offset, shadowCoord.z - bias));
+            shadow += mix(SHADOW_AMBIENT, 1.0, shadowSample);
             count++;
         }
     }
@@ -77,8 +77,8 @@ float ShadowPoisson(
             vec2 off = vec2(dx * float(x), dy * float(y));
             vec2 coord = GetPoissonDiskCoord(shadowCoord.xy + off, count, poissonRadius);
             
-            float sample = texture(shadowMap, vec3(coord, shadowCoord.z - bias));
-            shadow += mix(SHADOW_AMBIENT, 1.0, sample);
+            float shadowSample = texture(shadowMap, vec3(coord, shadowCoord.z - bias));
+            shadow += mix(SHADOW_AMBIENT, 1.0, shadowSample);
             count++;
         }
     }
@@ -152,4 +152,10 @@ float calculateShadow(
 }
 
 #endif // SHADOW_GLSL
+
+
+
+
+
+
 

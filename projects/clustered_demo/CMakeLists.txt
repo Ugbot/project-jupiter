@@ -18,8 +18,11 @@ target_include_directories(clustered_demo
         ${CMAKE_SOURCE_DIR}/vendored/glm
 )
 
-# Copy clustered shaders to output directory
+# Depend on shader targets - clustered_demo uses PBR shaders from lighting_demo
 add_dependencies(clustered_demo clustered_shaders)
+if(TARGET lighting_demo_shaders)
+    add_dependencies(clustered_demo lighting_demo_shaders)
+endif()
 
 # Set output directory
 set_target_properties(clustered_demo PROPERTIES

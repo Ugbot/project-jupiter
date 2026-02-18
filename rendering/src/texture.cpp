@@ -114,7 +114,9 @@ bool VulkanTexture::createFromAsset(VkDevice device, VmaAllocator allocator,
              imageAsset.name.c_str(), imageAsset.width, imageAsset.height);
 
     // Map ImageFormat to VkFormat
-    VkFormat vkFormat = VK_FORMAT_R8G8B8A8_SRGB; // Default
+    // NOTE: Use UNORM for all 8-bit textures and convert sRGB->linear manually in shader
+    // This matches the reference vulkan-gltf-pbr implementation
+    VkFormat vkFormat = VK_FORMAT_R8G8B8A8_UNORM; // Default
     switch (imageAsset.format) {
         case assets::ImageFormat::R8:
             vkFormat = VK_FORMAT_R8_UNORM;
@@ -126,7 +128,9 @@ bool VulkanTexture::createFromAsset(VkDevice device, VmaAllocator allocator,
             vkFormat = VK_FORMAT_R8G8B8A8_UNORM;
             break;
         case assets::ImageFormat::RGBA8_SRGB:
-            vkFormat = VK_FORMAT_R8G8B8A8_SRGB;
+            // Use UNORM - shader does manual pow(2.2) conversion like HelloVulkan
+            // This is more reliable than relying on Vulkan's auto-conversion
+            vkFormat = VK_FORMAT_R8G8B8A8_UNORM;
             break;
         case assets::ImageFormat::R16F:
             vkFormat = VK_FORMAT_R16_SFLOAT;
@@ -169,7 +173,28 @@ bool VulkanTexture::create(VkDevice device, VmaAllocator allocator,
         mipLevels_ = 1;
     }
 
-    VkDeviceSize imageSize = width * height * 4; // RGBA8 = 4 bytes per pixel
+    // Calculate bytes per pixel based on format
+    uint32_t bytesPerPixel = 4; // Default for RGBA8
+    switch (format) {
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            bytesPerPixel = 4;
+            break;
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+            bytesPerPixel = 8;
+            break;
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
+            bytesPerPixel = 16;
+            break;
+        default:
+            LOG_INFO("Texture", "Unknown format, assuming 4 bytes per pixel");
+            bytesPerPixel = 4;
+            break;
+    }
+    
+    VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * bytesPerPixel;
 
     // Create staging buffer
     VkBuffer stagingBuffer;

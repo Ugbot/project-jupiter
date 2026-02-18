@@ -1,0 +1,570 @@
+/**
+ * @file ghi_metal_impl.cpp
+ * @brief GHI Metal Backend Implementation (C++ only, using metal-cpp)
+ * 
+ * Native Metal backend for macOS/iOS using metal-cpp C++ wrapper.
+ * NO Objective-C - pure C++ using metal-cpp library.
+ * 
+ * Based on:
+ * - Apple Metal samples (deferred lighting, argument buffers)
+ * - metal-cpp documentation (https://developer.apple.com/metal/cpp/)
+ * - bkaradzic/metal-cpp (https://github.com/bkaradzic/metal-cpp)
+ */
+
+// Define metal-cpp implementation (only in ONE .cpp file)
+#define NS_PRIVATE_IMPLEMENTATION
+#define CA_PRIVATE_IMPLEMENTATION
+#define MTL_PRIVATE_IMPLEMENTATION
+
+#include <Foundation/Foundation.hpp>
+#include <Metal/Metal.hpp>
+#include <QuartzCore/QuartzCore.hpp>
+
+#include "ghi_metal.h"
+#include "logging/logging.h"
+
+namespace jupiter {
+namespace rendering {
+namespace ghi {
+
+GHI_MetalBackend::GHI_MetalBackend() {
+    LOG_INFO("GHI_Metal", "Metal backend created (using metal-cpp C++)");
+}
+
+GHI_MetalBackend::~GHI_MetalBackend() {
+    shutdown();
+}
+
+bool GHI_MetalBackend::initialize() {
+    LOG_INFO("GHI_Metal", "Initializing Metal backend (metal-cpp C++)");
+    
+    // Create autorelease pool (required for metal-cpp)
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    
+    // Create Metal device (metal-cpp C++ API)
+    MTL::Device* mtlDevice = MTL::CreateSystemDefaultDevice();
+    if (!mtlDevice) {
+        LOG_ERROR("GHI_Metal", "Failed to create Metal device");
+        pPool->release();
+        return false;
+    }
+    
+    device_ = mtlDevice;  // Store as void*
+    
+    // Log device info
+    NS::String* deviceName = mtlDevice->name();
+    LOG_INFO("GHI_Metal", "Metal device: %s", deviceName ? deviceName->utf8String() : "Unknown");
+    
+    // Create command queue
+    MTL::CommandQueue* mtlQueue = mtlDevice->newCommandQueue();
+    if (!mtlQueue) {
+        LOG_ERROR("GHI_Metal", "Failed to create command queue");
+        mtlDevice->release();
+        pPool->release();
+        return false;
+    }
+    
+    commandQueue_ = mtlQueue;  // Store as void*
+    
+    // Query capabilities
+    queryCapabilities();
+    
+    LOG_INFO("GHI_Metal", "Metal backend initialized successfully");
+    LOG_INFO("GHI_Metal", "  Compute shaders: yes");
+    LOG_INFO("GHI_Metal", "  Indirect draw: yes");
+    LOG_INFO("GHI_Metal", "  SIMD-groups: yes (size=%u)", capabilities_.subgroupSize);
+    LOG_INFO("GHI_Metal", "  Tile shaders: %s", capabilities_.hasTileShaders ? "yes" : "no");
+    LOG_INFO("GHI_Metal", "  Memoryless textures: %s", capabilities_.hasMemorylessTextures ? "yes" : "no");
+    
+    pPool->release();
+    return true;
+}
+
+void GHI_MetalBackend::shutdown() {
+    LOG_INFO("GHI_Metal", "Shutting down Metal backend");
+    
+    NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
+    
+    // Release all resources (metal-cpp C++ API)
+    for (auto& [id, buffer] : buffers_) {
+        if (buffer) {
+            MTL::Buffer* mtlBuffer = static_cast<MTL::Buffer*>(buffer);
+            mtlBuffer->release();
+        }
+    }
+    buffers_.clear();
+    
+    for (auto& [id, texture] : textures_) {
+        if (texture) {
+            MTL::Texture* mtlTexture = static_cast<MTL::Texture*>(texture);
+            mtlTexture->release();
+        }
+    }
+    textures_.clear();
+    
+    for (auto& [id, sampler] : samplers_) {
+        if (sampler) {
+            MTL::SamplerState* mtlSampler = static_cast<MTL::SamplerState*>(sampler);
+            mtlSampler->release();
+        }
+    }
+    samplers_.clear();
+    
+    for (auto& [id, pipeline] : renderPipelines_) {
+        if (pipeline) {
+            MTL::RenderPipelineState* mtlPipeline = static_cast<MTL::RenderPipelineState*>(pipeline);
+            mtlPipeline->release();
+        }
+    }
+    renderPipelines_.clear();
+    
+    for (auto& [id, pipeline] : computePipelines_) {
+        if (pipeline) {
+            MTL::ComputePipelineState* mtlPipeline = static_cast<MTL::ComputePipelineState*>(pipeline);
+            mtlPipeline->release();
+        }
+    }
+    computePipelines_.clear();
+    
+    if (commandQueue_) {
+        MTL::CommandQueue* mtlQueue = static_cast<MTL::CommandQueue*>(commandQueue_);
+        mtlQueue->release();
+        commandQueue_ = nullptr;
+    }
+    
+    if (device_) {
+        MTL::Device* mtlDevice = static_cast<MTL::Device*>(device_);
+        mtlDevice->release();
+        device_ = nullptr;
+    }
+    
+    pPool->release();
+    LOG_INFO("GHI_Metal", "Metal backend shutdown complete");
+}
+
+void GHI_MetalBackend::waitIdle() {
+    // Metal handles synchronization automatically via command buffer completion
+    // If needed, can wait on last command buffer
+}
+
+void GHI_MetalBackend::queryCapabilities() {
+    MTL::Device* mtlDevice = static_cast<MTL::Device*>(device_);
+    
+    capabilities_.backend = Backend::Metal;
+    NS::String* name = mtlDevice->name();
+    capabilities_.deviceName = name ? name->utf8String() : "Metal Device";
+    capabilities_.driverVersion = "Metal 3.0+";
+    
+    // Tier 1 - Always available on Metal
+    capabilities_.hasIndexedDraw = true;
+    capabilities_.hasDepthTest = true;
+    capabilities_.hasMRT = true;
+    capabilities_.maxColorAttachments = 8;
+    capabilities_.maxTextureSize = 16384;
+    
+    // Tier 2 - Metal always supports these (near-common denominator)
+    capabilities_.hasComputeShaders = true;
+    capabilities_.hasIndirectDraw = true;
+    capabilities_.hasStorageBuffers = true;
+    capabilities_.maxComputeWorkGroupSize[0] = 1024;
+    capabilities_.maxComputeWorkGroupSize[1] = 1024;
+    capabilities_.maxComputeWorkGroupSize[2] = 1024;
+    
+    // Tier 3 - Metal SIMD-groups (optimization features)
+    capabilities_.hasSubgroups = true;
+    capabilities_.subgroupSize = 32;  // Typical for Apple GPUs
+    capabilities_.hasTessellation = mtlDevice->supportsFamily(MTL::GPUFamilyApple4);
+    capabilities_.hasGeometryShaders = false;  // Metal doesn't have geometry shaders
+    
+    // Tier 4 - Metal-specific features
+    capabilities_.hasMeshShaders = mtlDevice->supportsFamily(MTL::GPUFamilyApple7);  // Metal 3
+    capabilities_.hasRayTracing = mtlDevice->supportsRaytracing();
+    capabilities_.hasTileShaders = mtlDevice->supportsFamily(MTL::GPUFamilyApple4);  // TBDR
+    capabilities_.hasMemorylessTextures = true;  // All Apple GPUs
+    capabilities_.hasArgumentBuffers = true;      // Metal 2+
+    
+    // Metal extensions
+    metalExtensions_.hasSIMDPermute = true;
+    metalExtensions_.hasSIMDShuffle = true;
+}
+
+BufferHandle GHI_MetalBackend::createBuffer(const BufferCreateInfo& info) {
+    MTL::Device* mtlDevice = static_cast<MTL::Device*>(device_);
+    
+    // Convert usage to Metal resource options
+    MTL::ResourceOptions options = MTL::ResourceStorageModeShared;  // CPU/GPU accessible
+    if (info.usage == BufferUsage::Static) {
+        // For static data, use shared mode with CPU cache mode
+        options = MTL::ResourceStorageModeShared | MTL::ResourceCPUCacheModeWriteCombined;
+    }
+    
+    // Create buffer (metal-cpp C++ API)
+    MTL::Buffer* mtlBuffer = nullptr;
+    if (info.data && info.size > 0) {
+        mtlBuffer = mtlDevice->newBuffer(info.data, info.size, options);
+    } else if (info.size > 0) {
+        mtlBuffer = mtlDevice->newBuffer(info.size, options);
+    } else {
+        LOG_ERROR("GHI_Metal", "Cannot create buffer with size=0");
+        return BufferHandle{};
+    }
+    
+    if (!mtlBuffer) {
+        LOG_ERROR("GHI_Metal", "Failed to create buffer (size=%zu)", info.size);
+        return BufferHandle{};
+    }
+    
+    BufferHandle handle;
+    handle.id = nextBufferID_++;
+    buffers_[handle.id] = mtlBuffer;  // Store MTL::Buffer* as void*
+    
+    LOG_INFO("GHI_Metal", "Created buffer: id=%u, size=%zu, type=%d", 
+             handle.id, info.size, (int)info.type);
+    
+    return handle;
+}
+
+void GHI_MetalBackend::destroyBuffer(BufferHandle handle) {
+    auto it = buffers_.find(handle.id);
+    if (it != buffers_.end()) {
+        if (it->second) {
+            MTL::Buffer* mtlBuffer = static_cast<MTL::Buffer*>(it->second);
+            mtlBuffer->release();
+        }
+        buffers_.erase(it);
+        LOG_INFO("GHI_Metal", "Destroyed buffer: id=%u", handle.id);
+    }
+}
+
+void GHI_MetalBackend::updateBuffer(BufferHandle handle, size_t offset, size_t size, const void* data) {
+    auto it = buffers_.find(handle.id);
+    if (it == buffers_.end()) {
+        LOG_ERROR("GHI_Metal", "Invalid buffer handle: %u", handle.id);
+        return;
+    }
+    
+    MTL::Buffer* mtlBuffer = static_cast<MTL::Buffer*>(it->second);
+    void* contents = mtlBuffer->contents();
+    if (contents) {
+        // Copy data to buffer's CPU-accessible memory
+        std::memcpy(static_cast<uint8_t*>(contents) + offset, data, size);
+    } else {
+        LOG_ERROR("GHI_Metal", "Cannot map GPU-private buffer (use staging buffer)");
+    }
+}
+
+TextureHandle GHI_MetalBackend::createTexture(const TextureCreateInfo& info) {
+    MTL::Device* mtlDevice = reinterpret_cast<MTL::Device*>(device_);
+    
+    // Create texture descriptor (metal-cpp C++ API)
+    MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
+    
+    // Set texture type
+    switch (info.type) {
+        case TextureType::Texture2D:
+            descriptor->setTextureType(MTL::TextureType2D);
+            break;
+        case TextureType::TextureCube:
+            descriptor->setTextureType(MTL::TextureTypeCube);
+            break;
+        case TextureType::Texture3D:
+            descriptor->setTextureType(MTL::TextureType3D);
+            break;
+        case TextureType::TextureArray:
+            descriptor->setTextureType(MTL::TextureType2DArray);
+            break;
+    }
+    
+    // Set format
+    descriptor->setPixelFormat(static_cast<MTL::PixelFormat>(convertFormat(info.format)));
+    descriptor->setWidth(info.width);
+    descriptor->setHeight(info.height);
+    descriptor->setDepth(info.depth);
+    descriptor->setMipmapLevelCount(info.mipLevels > 0 ? info.mipLevels : 1);
+    descriptor->setUsage(MTL::TextureUsageShaderRead);
+    descriptor->setStorageMode(MTL::StorageModePrivate);  // GPU-only
+    
+    // Create texture
+    MTL::Texture* mtlTexture = mtlDevice->newTexture(descriptor);
+    descriptor->release();
+    
+    if (!mtlTexture) {
+        LOG_ERROR("GHI_Metal", "Failed to create texture (%ux%u)", info.width, info.height);
+        return TextureHandle{};
+    }
+    
+    TextureHandle handle;
+    handle.id = nextTextureID_++;
+    textures_[handle.id] = mtlTexture;  // Store as void*
+    
+    LOG_INFO("GHI_Metal", "Created texture: id=%u, %ux%u, format=%d", 
+             handle.id, info.width, info.height, (int)info.format);
+    
+    // Upload initial data if provided
+    if (info.data) {
+        updateTexture(handle, 0, 0, 0, info.width, info.height, info.data);
+    }
+    
+    return handle;
+}
+
+void GHI_MetalBackend::destroyTexture(TextureHandle handle) {
+    auto it = textures_.find(handle.id);
+    if (it != textures_.end()) {
+        if (it->second) {
+            MTL::Texture* mtlTexture = reinterpret_cast<MTL::Texture*>(it->second);
+            mtlTexture->release();
+        }
+        textures_.erase(it);
+    }
+}
+
+void GHI_MetalBackend::updateTexture(TextureHandle handle, uint32_t level, uint32_t x, uint32_t y,
+                                    uint32_t width, uint32_t height, const void* data) {
+    auto it = textures_.find(handle.id);
+    if (it == textures_.end()) {
+        LOG_ERROR("GHI_Metal", "Invalid texture handle: %u", handle.id);
+        return;
+    }
+    
+    MTL::Texture* mtlTexture = reinterpret_cast<MTL::Texture*>(it->second);
+    
+    // Upload data to texture
+    MTL::Region region = MTL::Region(x, y, 0, width, height, 1);
+    size_t bytesPerRow = width * 4;  // TODO: Calculate from format
+    mtlTexture->replaceRegion(region, level, data, bytesPerRow);
+}
+
+ShaderHandle GHI_MetalBackend::createShader(const ShaderSource& source) {
+    // TODO: Load .metal file or compile MSL source
+    // For now, stub
+    LOG_INFO("GHI_Metal", "createShader (stub) - TODO: load .metal file");
+    
+    ShaderHandle handle;
+    handle.id = nextShaderID_++;
+    return handle;
+}
+
+void GHI_MetalBackend::destroyShader(ShaderHandle handle) {
+    // TODO: Release shader pipeline states
+}
+
+void GHI_MetalBackend::beginFrame() {
+    MTL::CommandQueue* mtlQueue = reinterpret_cast<MTL::CommandQueue*>(commandQueue_);
+    
+    // Create command buffer for this frame (metal-cpp C++ API)
+    currentCommandBuffer_ = mtlQueue->commandBuffer();  // Store as void*
+    
+    LOG_INFO("GHI_Metal", "Begin frame");
+}
+
+void GHI_MetalBackend::endFrame() {
+    if (!currentCommandBuffer_) {
+        return;
+    }
+    
+    MTL::CommandBuffer* mtlCmdBuffer = reinterpret_cast<MTL::CommandBuffer*>(currentCommandBuffer_);
+    
+    // Present drawable if we have one
+    if (currentDrawable_) {
+        CA::MetalDrawable* drawable = reinterpret_cast<CA::MetalDrawable*>(currentDrawable_);
+        mtlCmdBuffer->presentDrawable(drawable);
+        currentDrawable_ = nullptr;
+    }
+    
+    // Commit command buffer (metal-cpp C++ API)
+    mtlCmdBuffer->commit();
+    currentCommandBuffer_ = nullptr;
+    
+    LOG_INFO("GHI_Metal", "End frame");
+}
+
+void GHI_MetalBackend::beginRenderPass() {
+    if (!currentCommandBuffer_) {
+        LOG_ERROR("GHI_Metal", "Cannot begin render pass: no active command buffer");
+        return;
+    }
+    
+    MTL::CommandBuffer* mtlCmdBuffer = reinterpret_cast<MTL::CommandBuffer*>(currentCommandBuffer_);
+    
+    // TODO: Create render pass descriptor with clear values
+    // For now, stub
+    LOG_INFO("GHI_Metal", "Begin render pass (stub)");
+}
+
+void GHI_MetalBackend::endRenderPass() {
+    if (currentRenderEncoder_) {
+        MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+        encoder->endEncoding();
+        currentRenderEncoder_ = nullptr;
+    }
+    
+    LOG_INFO("GHI_Metal", "End render pass");
+}
+
+void GHI_MetalBackend::setViewport(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    if (!currentRenderEncoder_) return;
+    
+    MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+    
+    // Set viewport (metal-cpp C++ API)
+    MTL::Viewport viewport = {
+        static_cast<double>(x),
+        static_cast<double>(y),
+        static_cast<double>(width),
+        static_cast<double>(height),
+        0.0,  // znear
+        1.0   // zfar
+    };
+    encoder->setViewport(viewport);
+}
+
+void GHI_MetalBackend::setScissor(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    if (!currentRenderEncoder_) return;
+    
+    MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+    
+    // Set scissor rect (metal-cpp C++ API)
+    MTL::ScissorRect scissor = { x, y, width, height };
+    encoder->setScissorRect(scissor);
+}
+
+// Note: draw, drawIndexed, dispatch, dispatchIndirect
+// are implemented in ghi_metal_complete.cpp
+
+void GHI_MetalBackend::drawIndirect(BufferHandle indirectBuffer, uint32_t drawCount, uint32_t stride) {
+    if (!currentRenderEncoder_) return;
+    
+    auto it = buffers_.find(indirectBuffer.id);
+    if (it == buffers_.end()) {
+        LOG_ERROR("GHI_Metal", "Invalid indirect buffer");
+        return;
+    }
+    
+    MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+    MTL::Buffer* mtlBuffer = reinterpret_cast<MTL::Buffer*>(it->second);
+    
+    // Indirect draw (metal-cpp C++ API)
+    encoder->drawPrimitives(
+        MTL::PrimitiveTypeTriangle,
+        mtlBuffer,
+        0  // offset
+    );
+}
+
+void GHI_MetalBackend::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+    if (!currentComputeEncoder_) {
+        LOG_ERROR("GHI_Metal", "Cannot dispatch: no active compute encoder");
+        return;
+    }
+    
+    MTL::ComputeCommandEncoder* encoder = reinterpret_cast<MTL::ComputeCommandEncoder*>(currentComputeEncoder_);
+    
+    // Dispatch compute (metal-cpp C++ API)
+    MTL::Size gridSize = MTL::Size(groupCountX, groupCountY, groupCountZ);
+    MTL::Size threadgroupSize = MTL::Size(8, 8, 1);  // TODO: Get from shader
+    encoder->dispatchThreadgroups(gridSize, threadgroupSize);
+}
+
+void GHI_MetalBackend::dispatchIndirect(BufferHandle indirectBuffer) {
+    // TODO: Metal indirect compute dispatch
+    LOG_INFO("GHI_Metal", "dispatchIndirect (stub)");
+}
+
+void GHI_MetalBackend::setRenderState(const RenderState& state) {
+    currentState_ = state;
+    // Metal state is set during pipeline creation, not dynamically
+}
+
+void GHI_MetalBackend::getRenderState(RenderState& state) {
+    state = currentState_;
+}
+
+void GHI_MetalBackend::bindVertexBuffer(BufferHandle buffer, uint32_t binding, size_t offset) {
+    if (!currentRenderEncoder_) return;
+    
+    auto it = buffers_.find(buffer.id);
+    if (it == buffers_.end()) return;
+    
+    MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+    MTL::Buffer* mtlBuffer = reinterpret_cast<MTL::Buffer*>(it->second);
+    
+    // Bind vertex buffer (metal-cpp C++ API)
+    encoder->setVertexBuffer(mtlBuffer, offset, binding);
+}
+
+void GHI_MetalBackend::bindIndexBuffer(BufferHandle buffer, size_t offset) {
+    // Metal binds index buffer in draw call, not separately
+    // Store for later use in drawIndexed
+}
+
+void GHI_MetalBackend::bindUniformBuffer(BufferHandle buffer, uint32_t set, uint32_t binding) {
+    if (!currentRenderEncoder_) return;
+    
+    auto it = buffers_.find(buffer.id);
+    if (it == buffers_.end()) return;
+    
+    MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+    MTL::Buffer* mtlBuffer = reinterpret_cast<MTL::Buffer*>(it->second);
+    
+    // Bind uniform buffer (metal-cpp C++ API)
+    // Metal uses buffer index, not descriptor sets
+    uint32_t bufferIndex = set * 10 + binding;  // Simple mapping
+    encoder->setVertexBuffer(mtlBuffer, 0, bufferIndex);
+    encoder->setFragmentBuffer(mtlBuffer, 0, bufferIndex);
+}
+
+void GHI_MetalBackend::bindTexture(TextureHandle texture, uint32_t set, uint32_t binding) {
+    if (!currentRenderEncoder_) return;
+    
+    auto it = textures_.find(texture.id);
+    if (it == textures_.end()) return;
+    
+    MTL::RenderCommandEncoder* encoder = reinterpret_cast<MTL::RenderCommandEncoder*>(currentRenderEncoder_);
+    MTL::Texture* mtlTexture = reinterpret_cast<MTL::Texture*>(it->second);
+    
+    // Bind texture (metal-cpp C++ API)
+    uint32_t textureIndex = set * 10 + binding;  // Simple mapping
+    encoder->setFragmentTexture(mtlTexture, textureIndex);
+}
+
+void GHI_MetalBackend::memoryBarrier() {
+    // Metal handles synchronization automatically
+}
+
+void GHI_MetalBackend::bufferBarrier(BufferHandle buffer) {
+    // Metal handles synchronization automatically
+}
+
+void GHI_MetalBackend::textureBarrier(TextureHandle texture) {
+    // Metal handles synchronization automatically
+}
+
+int GHI_MetalBackend::convertFormat(Format format) {
+    // Format → MTL::PixelFormat
+    switch (format) {
+        case Format::RGBA8_UNORM: return static_cast<int>(MTL::PixelFormatRGBA8Unorm);
+        case Format::RGBA8_SRGB: return static_cast<int>(MTL::PixelFormatRGBA8Unorm_sRGB);
+        case Format::R32_FLOAT: return static_cast<int>(MTL::PixelFormatR32Float);
+        case Format::RGBA32_FLOAT: return static_cast<int>(MTL::PixelFormatRGBA32Float);
+        case Format::Depth32F: return static_cast<int>(MTL::PixelFormatDepth32Float);
+        case Format::Depth24_Stencil8: return static_cast<int>(MTL::PixelFormatDepth24Unorm_Stencil8);
+        default: return static_cast<int>(MTL::PixelFormatRGBA8Unorm);
+    }
+}
+
+int GHI_MetalBackend::convertPrimitiveTopology(PrimitiveTopology topology) {
+    // PrimitiveTopology → MTL::PrimitiveType
+    switch (topology) {
+        case PrimitiveTopology::TriangleList: return static_cast<int>(MTL::PrimitiveTypeTriangle);
+        case PrimitiveTopology::TriangleStrip: return static_cast<int>(MTL::PrimitiveTypeTriangleStrip);
+        case PrimitiveTopology::LineList: return static_cast<int>(MTL::PrimitiveTypeLine);
+        case PrimitiveTopology::LineStrip: return static_cast<int>(MTL::PrimitiveTypeLineStrip);
+        case PrimitiveTopology::PointList: return static_cast<int>(MTL::PrimitiveTypePoint);
+        default: return static_cast<int>(MTL::PrimitiveTypeTriangle);
+    }
+}
+
+} // namespace ghi
+} // namespace rendering
+} // namespace jupiter

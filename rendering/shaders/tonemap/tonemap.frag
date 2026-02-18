@@ -12,21 +12,11 @@ layout(location = 0) out vec4 fragColor;
 
 layout(set = 0, binding = 0) uniform sampler2D hdrImage;
 
-// Optional: Auto-exposure buffer
-// When autoExposure = 1, reads exposure from this buffer
-layout(set = 0, binding = 1) readonly buffer ExposureBuffer {
-    uint histogram[256];       // Not used in this shader
-    float averageLuminance;    // Scene average luminance
-    float currentExposure;     // Auto-calculated exposure
-    float targetExposure;      // Target exposure
-    float _padding;
-} exposureBuffer;
-
 layout(push_constant) uniform PushConstants {
-    float exposure;       // Manual exposure value (used when autoExposure = 0)
+    float exposure;       // Manual exposure value
     float gamma;          // Gamma correction value (typically 2.2)
     int operator_;        // Tonemapping operator: 0=ACES, 1=Reinhard, 2=Uncharted2, 3=None
-    int autoExposure;     // 0 = use push constant exposure, 1 = use buffer exposure
+    float padding;
 } pc;
 
 // ACES filmic tonemapping
@@ -78,18 +68,8 @@ void main() {
     // Sample HDR color
     vec3 hdrColor = texture(hdrImage, texCoord).rgb;
     
-    // Get exposure value - either from auto-exposure buffer or push constant
-    float exposureValue;
-    if (pc.autoExposure != 0) {
-        // Use auto-calculated exposure from compute pipeline
-        exposureValue = exposureBuffer.currentExposure;
-    } else {
-        // Use manual exposure from push constant
-        exposureValue = pc.exposure;
-    }
-    
     // Apply exposure
-    hdrColor *= exposureValue;
+    hdrColor *= pc.exposure;
     
     // Apply tonemapping operator
     vec3 mapped;

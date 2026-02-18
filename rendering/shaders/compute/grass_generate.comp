@@ -1,0 +1,154 @@
+#version 450
+
+// Grass instance generation compute shader
+// Populates grass instances around camera with trail-based culling
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Inputs
+layout(set=0, binding=0) uniform sampler2D heightmap;
+layout(set=0, binding=1) uniform sampler2D trailIntensity;
+layout(set=0, binding=2) uniform sampler2D trailDir;
+
+// Grass instance (matches CPU struct)
+struct GrassInstance {
+    vec4 pos_height;     // xyz = world pos, w = blade height
+    vec4 normal_seed;    // xyz = world normal, w = random seed
+    vec4 bend_flatten;   // xy = trail bend dir, z = bend amount, w = flatten amount
+};
+
+// Outputs
+layout(std430, set=0, binding=3) buffer InstanceBuffer {
+    GrassInstance instances[];
+};
+
+layout(std430, set=0, binding=4) buffer DrawIndirect {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+} drawCmd;
+
+layout(std430, set=0, binding=5) buffer AtomicCounter {
+    uint count;
+} counter;
+
+// Parameters
+layout(push_constant) uniform GrassParams {
+    vec2 cameraPos;
+    vec2 terrainSize_inv;
+    vec2 trailOrigin;
+    vec2 trailWorldSize_inv;
+    float grassRadius;
+    float cellSize;
+    float minHeight;
+    float maxHeight;
+    float densityMul;
+    float minNormalY;
+    float trailDensityKill;
+    float minHeightMul;
+    uint maxInstances;
+    uint seed;
+} params;
+
+// Hash function for deterministic RNG
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float rand(ivec2 coord) {
+    uint h = hash(uint(coord.x) + hash(uint(coord.y) + params.seed));
+    return float(h) / 4294967295.0;
+}
+
+void main() {
+    ivec2 cellCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Calculate world position for this candidate cell
+    // Grid centered on camera
+    float gridRadius = params.grassRadius;
+    vec2 cellOffset = vec2(cellCoord) - vec2(gridRadius / params.cellSize);
+    vec2 worldXZ = params.cameraPos + cellOffset * params.cellSize;
+    
+    // Convert to heightmap UV (terrain centered at origin)
+    vec2 terrainHalfSize = vec2(0.5) / params.terrainSize_inv;
+    vec2 uv = (worldXZ + terrainHalfSize) * params.terrainSize_inv;
+    
+    // Bounds check
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return;
+    }
+    
+    // Sample heightmap
+    float height = texture(heightmap, uv).r;
+    vec3 worldPos = vec3(worldXZ.x, height, worldXZ.y);
+    
+    // Compute normal using finite differences
+    vec2 texelSize = params.terrainSize_inv * vec2(2.0) / params.terrainSize_inv;
+    float h0 = textureOffset(heightmap, uv, ivec2(1, 0)).r;
+    float h1 = textureOffset(heightmap, uv, ivec2(-1, 0)).r;
+    float h2 = textureOffset(heightmap, uv, ivec2(0, 1)).r;
+    float h3 = textureOffset(heightmap, uv, ivec2(0, -1)).r;
+    
+    vec3 tangentX = vec3(texelSize.x * 2.0, h0 - h1, 0.0);
+    vec3 tangentZ = vec3(0.0, h2 - h3, texelSize.y * 2.0);
+    vec3 normal = normalize(cross(tangentZ, tangentX));
+    
+    // Slope rejection (don't spawn grass on steep slopes)
+    if (normal.y < params.minNormalY) {
+        return;
+    }
+    
+    // Sample trail at this position
+    vec2 trailUV = (worldXZ - params.trailOrigin) * params.trailWorldSize_inv;
+    float trailI = 0.0;
+    vec2 trailD = vec2(0.0);
+    
+    if (all(greaterThanEqual(trailUV, vec2(0.0))) && all(lessThan(trailUV, vec2(1.0)))) {
+        trailI = texture(trailIntensity, trailUV).r;
+        trailD = texture(trailDir, trailUV).rg;
+    }
+    
+    // Density-based culling (trail reduces density)
+    float densityRoll = rand(cellCoord);
+    float densityThreshold = (1.0 - params.densityMul) + trailI * params.trailDensityKill;
+    if (densityRoll < densityThreshold) {
+        return;
+    }
+    
+    // Jitter position within cell
+    vec2 jitter = (vec2(rand(cellCoord + ivec2(1, 0)), 
+                        rand(cellCoord + ivec2(0, 1))) - 0.5) * params.cellSize;
+    worldPos.x += jitter.x;
+    worldPos.z += jitter.y;
+    
+    // Random blade height (flattened by trail)
+    float bladeHeight = mix(params.minHeight, params.maxHeight, 
+                           rand(cellCoord + ivec2(2, 2)));
+    bladeHeight *= mix(1.0, params.minHeightMul, trailI);
+    
+    // Allocate instance slot (atomic)
+    uint idx = atomicAdd(counter.count, 1);
+    if (idx >= params.maxInstances) {
+        return;
+    }
+    
+    // Write instance data
+    instances[idx].pos_height = vec4(worldPos, bladeHeight);
+    instances[idx].normal_seed = vec4(normal, float(hash(uint(cellCoord.x ^ cellCoord.y))));
+    instances[idx].bend_flatten = vec4(trailD, trailI, trailI);
+    
+    // First invocation writes indirect command
+    if (gl_GlobalInvocationID.x == 0 && gl_GlobalInvocationID.y == 0) {
+        drawCmd.vertexCount = 12;  // BLADE_VERTS
+        drawCmd.instanceCount = counter.count;
+        drawCmd.firstVertex = 0;
+        drawCmd.firstInstance = 0;
+    }
+}
+

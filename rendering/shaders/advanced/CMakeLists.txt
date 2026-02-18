@@ -18,6 +18,9 @@ set(ADVANCED_SHADERS
     # G-buffer
     ${SHADER_SOURCE_DIR}/gbuffer/gbuffer.vert
     ${SHADER_SOURCE_DIR}/gbuffer/gbuffer.frag
+    # Deferred lighting
+    ${SHADER_SOURCE_DIR}/deferred/lighting.vert
+    ${SHADER_SOURCE_DIR}/deferred/lighting.frag
     # SSAO
     ${SHADER_SOURCE_DIR}/ssao/ssao.frag
     # Common
@@ -35,6 +38,7 @@ set(ADVANCED_SHADERS
 # Create output directories
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR}/shadow)
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR}/gbuffer)
+file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR}/deferred)
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR}/ssao)
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR}/common)
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR}/tonemap)

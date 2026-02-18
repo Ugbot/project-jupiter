@@ -6,8 +6,11 @@
 #include "rendering/vertex_formats.h"
 #include "assets/image_asset.h"
 #include "logging/logging.h"
+#include "profiling/profiler.h"
+#include <algorithm>
 #include "platform/platform.h"
 #include "platform/sdl_wrapper.h"
+#include <SDL3/SDL.h>
 #include <cstring>  // for memcpy
 #include <glm/gtc/type_ptr.hpp>
 
@@ -22,6 +25,23 @@ Application::Application(const std::string& title, uint32_t width, uint32_t heig
     , enableValidation_(enableValidation)
     , sdl_(nullptr)
     , timer_() {
+    // Default PBR tuning - balanced to avoid washing out colors
+    pbrPushConstants_.directLightIntensity = 1.0f;
+    pbrPushConstants_.ambientIntensity = 0.05f;
+    pbrPushConstants_.emissiveIntensity = 1.0f;
+    pbrPushConstants_.roughnessOverride = 0.5f;
+    pbrPushConstants_.metallicOverride = 0.0f;
+    pbrPushConstants_.baseReflectivity = 0.04f;
+    pbrPushConstants_.exposure = 1.0f;
+    pbrPushConstants_.shadowIntensity = 0.5f;
+    pbrPushConstants_.maxReflectionLod = 4.0f;
+    pbrPushConstants_.lightFalloff = 2.0f;
+    pbrPushConstants_.albedoMultiplier = 1.0f;
+
+    renderSettings_.ambientIntensity = pbrPushConstants_.ambientIntensity;
+    renderSettings_.exposure = pbrPushConstants_.exposure;
+    renderSettings_.lightFalloff = pbrPushConstants_.lightFalloff;
+    renderSettings_.albedoMultiplier = pbrPushConstants_.albedoMultiplier;
 }
 
 Application::~Application() {
@@ -119,6 +139,16 @@ void Application::shutdown() {
     // Clear loaded textures (VulkanTexture objects with VMA allocations)
     textures_.clear();
 
+    // Destroy deferred rendering resources
+    deferredPipeline_.reset();
+    gBufferPipeline_.reset();
+    gBufferResources_.reset();
+
+    // Destroy deferred rendering resources
+    deferredPipeline_.reset();
+    gBufferPipeline_.reset();
+    gBufferResources_.reset();
+
     // Destroy shadow pipeline and resources
     shadowPipeline_.reset();
     shadowResources_.reset();
@@ -205,12 +235,23 @@ void Application::mainLoop() {
         // Pre-render pass hook (shadow maps, G-buffer, SSAO, etc.)
         onPreRenderPass(cmd, currentFrameIndex_);
 
+        // Deferred rendering: G-buffer pass (before main render pass)
+        if (useDeferredRendering_ && autoRenderEnabled_) {
+            renderGBufferPass(cmd, currentFrameIndex_);
+        }
+
         // Begin main render pass (swapchain)
         renderer_->beginRenderPass(imageIndex);
 
-        // Render PBR scene if auto-render enabled
+        // Render scene
         if (autoRenderEnabled_) {
-            renderPBRScene(currentFrameIndex_);
+            if (useDeferredRendering_) {
+                // Deferred lighting pass
+                renderDeferredPass(currentFrameIndex_);
+            } else {
+                // Forward rendering
+                renderPBRScene(currentFrameIndex_);
+            }
         }
 
         // Call user render (allows custom rendering on top of auto-render)
@@ -424,10 +465,13 @@ void Application::enableAutoRender() {
     }
 
     autoRenderEnabled_ = true;
+    printf("[APP] autoRenderEnabled_ set to TRUE\n");
+    fflush(stdout);
     LOG_INFO("Application", "PBR auto-render mode enabled successfully");
 }
 
 bool Application::initializePBRSystems() {
+    JUPITER_PROFILE_SCOPE("Application::initializePBRSystems");
     LOG_INFO("Application", "Getting Vulkan context...");
     // Get Vulkan context from renderer
     VkDevice device = renderer_->getDevice();
@@ -452,7 +496,7 @@ bool Application::initializePBRSystems() {
     materialSystem_ = std::make_unique<MaterialSystem>();
 
     LOG_INFO("Application", "Initializing material system...");
-    if (!materialSystem_->initialize(device, 100)) {
+    if (!materialSystem_->initialize(device, allocator, 100)) {
         LOG_ERROR("Application", "Failed to initialize material system");
         return false;
     }
@@ -497,23 +541,17 @@ bool Application::initializePBRSystems() {
         return false;
     }
 
-    // Generate BRDF LUT using compute shader (Phase 1)
+    // Create a neutral fallback environment so rendering works before HDR is loaded
+    LOG_INFO("Application", "Creating fallback IBL environment (neutral gray)...");
+    if (!iblResources_->createFallback(device, allocator, commandPool, graphicsQueue)) {
+        LOG_ERROR("Application", "Failed to create IBL fallback resources");
+        return false;
+    }
+
+    // Generate BRDF LUT using compute shader (replaces fallback LUT when successful)
     LOG_INFO("Application", "Generating BRDF LUT with compute shader...");
     if (!iblResources_->generateBRDFLUT(device, allocator, commandPool, graphicsQueue)) {
-        LOG_ERROR("Application", "Failed to generate BRDF LUT, falling back to simple version");
-        // Fall back to simple version if compute shader fails
-        if (!iblResources_->createFallback(device, allocator, commandPool, graphicsQueue)) {
-            LOG_ERROR("Application", "Failed to create IBL fallback resources");
-            return false;
-        }
-    } else {
-        LOG_INFO("Application", "BRDF LUT generated successfully, using fallback for irradiance/prefiltered maps");
-        // For now, still create fallback irradiance and prefiltered maps
-        // (Phase 2-5 will replace these with proper HDR-based generation)
-        if (!iblResources_->createFallback(device, allocator, commandPool, graphicsQueue)) {
-            LOG_ERROR("Application", "Failed to create IBL fallback environment maps");
-            return false;
-        }
+        LOG_WARN("Application", "BRDF LUT generation failed, using fallback LUT");
     }
 
     LOG_INFO("Application", "Binding IBL resources to render globals...");
@@ -648,7 +686,7 @@ void Application::updateShadowMatrices(uint32_t frameIndex) {
     // Update render globals shadow effects UBO with light space matrix
     const glm::mat4& lightSpaceMatrix = shadowResources_->getLightSpaceMatrix();
     renderGlobals_->updateShadowEffects(frameIndex, lightSpaceMatrix, 
-                                        shadowsEnabled_, false, 1.0f, 0.005f);
+                                        shadowsEnabled_, renderSettings_.ssaoEnabled, 1.0f, 0.005f);
 }
 
 bool Application::createPBRPipeline() {
@@ -691,12 +729,12 @@ bool Application::createPBRPipeline() {
     vertPushConstantRange.size = 64;  // sizeof(mat4)
     config.pushConstants.push_back(vertPushConstantRange);
 
-    // Push constants for PBR parameters (36 bytes) - fragment shader
-    // struct: 8 floats + 1 uint = 36 bytes
+    // Push constants for PBR parameters (48 bytes) - fragment shader
+    // struct: 11 floats + 1 uint = 48 bytes (must match pbr.frag exactly)
     VkPushConstantRange fragPushConstantRange = {};
     fragPushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     fragPushConstantRange.offset = 64;  // After model matrix
-    fragPushConstantRange.size = 36;    // PBR params
+    fragPushConstantRange.size = 48;    // PBR params
     config.pushConstants.push_back(fragPushConstantRange);
 
     // Create pipeline
@@ -868,10 +906,16 @@ void Application::setAmbientLight(const float color[3], float intensity) {
     LOG_INFO("Application", "Set ambient light");
 }
 
+void Application::setPBRDebugFlags(uint32_t flags) {
+    pbrDebugFlags_ = flags;
+}
+
 void Application::renderPBRScene(uint32_t frameIndex) {
     if (!autoRenderEnabled_ || !sceneManager_ || !activeCamera_ || !pbrPipeline_) {
         return;
     }
+
+    JUPITER_PROFILE_SCOPE("Application::renderPBRScene");
 
     // Update camera uniforms
     if (renderGlobals_) {
@@ -890,28 +934,30 @@ void Application::renderPBRScene(uint32_t frameIndex) {
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pbrPipeline_->getPipeline());
 
-    // Push fragment shader constants (global PBR parameters)
-    struct FragmentPushConstants {
-        float directLightIntensity;
-        float ambientIntensity;
-        float emissiveIntensity;
-        float roughnessOverride;
-        float metallicOverride;
-        float baseReflectivity;
-        float exposure;
-        float shadowIntensity;
-        uint32_t flags;
-    } fragPc;
+    // Build fragment push constants from runtime settings
+    PBRPushConstants fragPc = pbrPushConstants_;
+    fragPc.ambientIntensity = renderSettings_.ambientIntensity;
+    fragPc.exposure = renderSettings_.exposure;
+    fragPc.lightFalloff = renderSettings_.lightFalloff;
+    fragPc.albedoMultiplier = renderSettings_.albedoMultiplier;
 
-    fragPc.directLightIntensity = 1.0f;
-    fragPc.ambientIntensity = 1.0f;
-    fragPc.emissiveIntensity = 1.0f;
-    fragPc.roughnessOverride = 0.5f;
-    fragPc.metallicOverride = 0.0f;
-    fragPc.baseReflectivity = 0.04f;
-    fragPc.exposure = 1.0f;
-    fragPc.shadowIntensity = 0.5f;
-    fragPc.flags = 0;
+    // Clamp reflection LOD to generated mip count (fallback has 0 mips)
+    float textureMaxLod = 0.0f;
+    if (iblResources_ && iblResources_->isValid()) {
+        textureMaxLod = static_cast<float>(iblResources_->getMaxReflectionLod());
+    }
+    if (renderSettings_.maxReflectionLodClamp >= 0.0f) {
+        textureMaxLod = std::min(textureMaxLod, renderSettings_.maxReflectionLodClamp);
+    }
+    fragPc.maxReflectionLod = textureMaxLod;
+
+    // Apply runtime feature toggles
+    if (!renderSettings_.iblEnabled) {
+        fragPc.disableIBL(true);
+    } else {
+        fragPc.disableIBL(false);
+    }
+    fragPc.flags |= pbrDebugFlags_;  // Preserve debug flags
 
     vkCmdPushConstants(commandBuffer, pbrPipeline_->getLayout(),
                       VK_SHADER_STAGE_FRAGMENT_BIT, 64, sizeof(fragPc), &fragPc);
@@ -942,12 +988,19 @@ RenderableHandle Application::spawnBox(const float position[3], const float dime
     }
 
     // Generate box mesh
-    MeshData meshData = Primitives::createBox(dimensions[0], dimensions[1], dimensions[2]);
+    // Box is same as cube with scale - use cube and scale later
+    primitives::MeshData meshData = primitives::createCube();
 
     // Create GPU mesh
     VkDevice device = renderer_->getDevice();
     VmaAllocator allocator = renderer_->getAllocator();
     
+    // TODO: Update for new primitives API - mesh creation disabled
+    LOG_ERROR("Application", "Mesh creation temporarily disabled - needs API update");
+    return RenderableHandle{};
+    
+#if 0
+    // Disabled - needs updating for new primitives API
     auto mesh = std::make_unique<VulkanMesh>();
     if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
         LOG_ERROR("Application", "Failed to create box GPU mesh");
@@ -972,7 +1025,6 @@ RenderableHandle Application::spawnBox(const float position[3], const float dime
 
     // Create renderable
     Renderable renderable;
-    renderable.mesh = mesh.get();
     renderable.material = material;
     
     // Set transform
@@ -981,10 +1033,9 @@ RenderableHandle Application::spawnBox(const float position[3], const float dime
     renderable.transform = transform;
 
     // Store mesh ownership
-    primitiveMeshes_.push_back(std::move(mesh));
 
     // Add to scene
-    return sceneManager_->addRenderable(renderable);
+#endif  // Disabled - needs updating for new primitives API
 }
 
 RenderableHandle Application::spawnSphere(const float position[3], float radius,
@@ -996,45 +1047,15 @@ RenderableHandle Application::spawnSphere(const float position[3], float radius,
     }
 
     // Generate sphere mesh
-    MeshData meshData = Primitives::createUVSphere(radius, segments, rings);
+    primitives::MeshData meshData = primitives::createSphere(radius, segments, rings);
 
     // Create GPU mesh
     VkDevice device = renderer_->getDevice();
     VmaAllocator allocator = renderer_->getAllocator();
     
-    auto mesh = std::make_unique<VulkanMesh>();
-    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
-        LOG_ERROR("Application", "Failed to create sphere GPU mesh");
-        return RenderableHandle{};
-    }
-
-    // Create material with optional color (reuse allocator from above)
-    Material* material = materialSystem_->createSimpleMaterial(
-        allocator,
-        DefaultTextures::get().getWhiteTexture(),
-        DefaultTextures::get().getNormalTexture(),
-        DefaultTextures::get().getWhiteTexture(),
-        DefaultTextures::get().getWhiteTexture(),
-        DefaultTextures::get().getBlackTexture(),
-        color
-    );
-
-    if (!material) {
-        LOG_ERROR("Application", "Failed to create material for sphere");
-        return RenderableHandle{};
-    }
-
-    // Create renderable
-    Renderable renderable;
-    renderable.mesh = mesh.get();
-    renderable.material = material;
-    
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f),
-                                         glm::vec3(position[0], position[1], position[2]));
-    renderable.transform = transform;
-
-    primitiveMeshes_.push_back(std::move(mesh));
-    return sceneManager_->addRenderable(renderable);
+    // TODO: Update for new primitives API
+    LOG_ERROR("Application", "Mesh creation temporarily disabled - needs API update");
+    return RenderableHandle{};
 }
 
 RenderableHandle Application::spawnCylinder(const float position[3], float radius,
@@ -1045,16 +1066,15 @@ RenderableHandle Application::spawnCylinder(const float position[3], float radiu
         return RenderableHandle{};
     }
 
-    MeshData meshData = Primitives::createCylinder(radius, height, segments, 1);
+    // Cylinder not yet implemented - use sphere for now
+    primitives::MeshData meshData = primitives::createSphere(radius, 32, 16);
 
     VkDevice device = renderer_->getDevice();
     VmaAllocator allocator = renderer_->getAllocator();
     
-    auto mesh = std::make_unique<VulkanMesh>();
-    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
-        LOG_ERROR("Application", "Failed to create cylinder GPU mesh");
-        return RenderableHandle{};
-    }
+    // TODO: Update for new primitives API
+    LOG_ERROR("Application", "Mesh creation temporarily disabled - needs API update");
+    return RenderableHandle{};
 
     Material* material = materialSystem_->createSimpleMaterial(
         allocator,
@@ -1072,15 +1092,12 @@ RenderableHandle Application::spawnCylinder(const float position[3], float radiu
     }
 
     Renderable renderable;
-    renderable.mesh = mesh.get();
     renderable.material = material;
     
     glm::mat4 transform = glm::translate(glm::mat4(1.0f),
                                          glm::vec3(position[0], position[1], position[2]));
     renderable.transform = transform;
 
-    primitiveMeshes_.push_back(std::move(mesh));
-    return sceneManager_->addRenderable(renderable);
 }
 
 RenderableHandle Application::spawnPlane(const float position[3], float width,
@@ -1090,16 +1107,14 @@ RenderableHandle Application::spawnPlane(const float position[3], float width,
         return RenderableHandle{};
     }
 
-    MeshData meshData = Primitives::createPlane(width, depth, 1, 1);
+    primitives::MeshData meshData = primitives::createPlane(width, depth, 1);
 
     VkDevice device = renderer_->getDevice();
     VmaAllocator allocator = renderer_->getAllocator();
     
-    auto mesh = std::make_unique<VulkanMesh>();
-    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
-        LOG_ERROR("Application", "Failed to create plane GPU mesh");
-        return RenderableHandle{};
-    }
+    // TODO: Update for new primitives API
+    LOG_ERROR("Application", "Mesh creation temporarily disabled - needs API update");
+    return RenderableHandle{};
 
     Material* material = materialSystem_->createSimpleMaterial(
         allocator,
@@ -1117,15 +1132,12 @@ RenderableHandle Application::spawnPlane(const float position[3], float width,
     }
 
     Renderable renderable;
-    renderable.mesh = mesh.get();
     renderable.material = material;
     
     glm::mat4 transform = glm::translate(glm::mat4(1.0f),
                                          glm::vec3(position[0], position[1], position[2]));
     renderable.transform = transform;
 
-    primitiveMeshes_.push_back(std::move(mesh));
-    return sceneManager_->addRenderable(renderable);
 }
 
 RenderableHandle Application::spawnCapsule(const float position[3], float radius,
@@ -1135,16 +1147,15 @@ RenderableHandle Application::spawnCapsule(const float position[3], float radius
         return RenderableHandle{};
     }
 
-    MeshData meshData = Primitives::createCapsule(radius, height, 32, 8);
+    // Capsule primitive not yet implemented - use sphere for now
+    primitives::MeshData meshData = primitives::createSphere(radius, 32, 16);
 
     VkDevice device = renderer_->getDevice();
     VmaAllocator allocator = renderer_->getAllocator();
     
-    auto mesh = std::make_unique<VulkanMesh>();
-    if (!mesh->create(device, allocator, meshData.vertices, meshData.indices)) {
-        LOG_ERROR("Application", "Failed to create capsule GPU mesh");
-        return RenderableHandle{};
-    }
+    // TODO: Update for new primitives API
+    LOG_ERROR("Application", "Mesh creation temporarily disabled - needs API update");
+    return RenderableHandle{};
 
     Material* material = materialSystem_->createSimpleMaterial(
         allocator,
@@ -1162,15 +1173,12 @@ RenderableHandle Application::spawnCapsule(const float position[3], float radius
     }
 
     Renderable renderable;
-    renderable.mesh = mesh.get();
     renderable.material = material;
     
     glm::mat4 transform = glm::translate(glm::mat4(1.0f),
                                          glm::vec3(position[0], position[1], position[2]));
     renderable.transform = transform;
 
-    primitiveMeshes_.push_back(std::move(mesh));
-    return sceneManager_->addRenderable(renderable);
 }
 
 void Application::setRenderableTransform(RenderableHandle handle,
@@ -1232,6 +1240,38 @@ void Application::enableHDR(bool enable) {
 
 void Application::setExposure(float exposure) {
     manualExposure_ = std::max(0.01f, std::min(exposure, 20.0f));
+    renderSettings_.exposure = manualExposure_;
+}
+
+void Application::setMaxReflectionLod(float lod) {
+    pbrPushConstants_.maxReflectionLod = std::max(0.0f, lod);
+}
+
+void Application::setLightFalloff(float falloff) {
+    pbrPushConstants_.lightFalloff = std::max(0.01f, falloff);
+}
+
+void Application::setAlbedoMultiplier(float multiplier) {
+    pbrPushConstants_.albedoMultiplier = std::max(0.0f, multiplier);
+}
+
+void Application::applyRenderSettings(const RenderSettings& settings) {
+    renderSettings_ = settings;
+    // Keep shadow toggle in sync with internal flag used by shadow systems
+    shadowsEnabled_ = renderSettings_.shadowsEnabled;
+}
+
+void Application::setIBLEnabled(bool enabled) {
+    renderSettings_.iblEnabled = enabled;
+}
+
+void Application::setShadowsEnabled(bool enabled) {
+    renderSettings_.shadowsEnabled = enabled;
+    shadowsEnabled_ = enabled;
+}
+
+void Application::setSSAOEnabled(bool enabled) {
+    renderSettings_.ssaoEnabled = enabled;
 }
 
 void Application::setAutoExposure(bool enable) {
@@ -1298,6 +1338,50 @@ void Application::setDirectLightIntensity(float intensity) {
 
 void Application::setAmbientIntensity(float intensity) {
     pbrPushConstants_.ambientIntensity = std::max(0.0f, intensity);
+    renderSettings_.ambientIntensity = pbrPushConstants_.ambientIntensity;
+}
+
+bool Application::loadIBLFromHDR(const std::string& hdrFilePath) {
+    if (!renderer_ || !iblResources_) {
+        LOG_ERROR("Application", "Cannot load IBL: renderer not initialized");
+        return false;
+    }
+    JUPITER_PROFILE_SCOPE("Application::loadIBLFromHDR");
+    
+    LOG_INFO("Application", "Loading IBL from HDR: %s", hdrFilePath.c_str());
+    
+    VkDevice device = renderer_->getDevice();
+    VmaAllocator allocator = renderer_->getAllocator();
+    VkCommandPool commandPool = renderer_->getCommandPool();
+    VkQueue queue = renderer_->getGraphicsQueue();
+    
+    // Generate IBL resources from HDR
+    if (!iblResources_->generateFromHDR(device, allocator, commandPool, queue, hdrFilePath)) {
+        LOG_ERROR("Application", "Failed to generate IBL from HDR");
+        return false;
+    }
+    
+    // Update render globals with new IBL resources
+    if (!renderGlobals_->updateIBLResources(
+            iblResources_->getIrradianceMapView(),
+            iblResources_->getIrradianceMapSampler(),
+            iblResources_->getPrefilteredMapView(),
+            iblResources_->getPrefilteredMapSampler(),
+            iblResources_->getBRDFLUTView(),
+            iblResources_->getBRDFLUTSampler())) {
+        LOG_ERROR("Application", "Failed to update render globals with IBL resources");
+        return false;
+    }
+    
+    // If we have an environment map, enable skybox
+    if (iblResources_->hasEnvironmentMap()) {
+        LOG_INFO("Application", "Environment map available for skybox");
+        // For ApplicationAdvanced users, they can call features_->setEnvironmentMap()
+        // For base Application, skybox is not rendered
+    }
+    
+    LOG_INFO("Application", "IBL loaded successfully from HDR");
+    return true;
 }
 
 void Application::setShadowIntensity(float intensity) {
@@ -1310,6 +1394,225 @@ void Application::setPBRDebugMode(uint32_t mode) {
 
 void Application::clearPBRDebugMode() {
     pbrPushConstants_.clearDebugMode();
+}
+
+// ============================================================================
+// Deferred Rendering
+// ============================================================================
+
+bool Application::enableDeferredRendering(bool enable) {
+    if (useDeferredRendering_ == enable) {
+        return true;  // Already in the requested state
+    }
+
+    if (enable) {
+        // Deferred rendering depends on the PBR scene systems (materials, scene manager, render globals).
+        // If the user calls enableDeferredRendering() before enableAutoRender(), attempt to bring up the
+        // required systems automatically rather than hard-failing.
+        if (!autoRenderEnabled_) {
+            LOG_WARN("Application", "Deferred requested before auto-render; enabling auto-render prerequisites");
+            enableAutoRender();
+            if (!autoRenderEnabled_) {
+                LOG_ERROR("Application", "Cannot enable deferred rendering: failed to enable auto-render prerequisites");
+                return false;
+            }
+        }
+
+        // If pipelines/resources already exist, don't recreate them on toggle.
+        // Recreating here can race the GPU (resources may still be referenced by in-flight frames)
+        // and can cause crashes on some drivers.
+        if (!deferredPipeline_ || !gBufferPipeline_ || !gBufferResources_) {
+            if (!initializeDeferredRendering()) {
+                LOG_ERROR("Application", "Failed to initialize deferred rendering");
+                return false;
+            }
+        }
+
+        useDeferredRendering_ = true;
+        LOG_INFO("Application", "Deferred rendering enabled");
+    } else {
+        useDeferredRendering_ = false;
+        LOG_INFO("Application", "Deferred rendering disabled (using forward rendering)");
+    }
+
+    return true;
+}
+
+bool Application::initializeDeferredRendering() {
+    LOG_INFO("Application", "Initializing deferred rendering...");
+
+    VkDevice device = renderer_->getDevice();
+    VkPhysicalDevice physicalDevice = renderer_->getPhysicalDevice();
+
+    // Create G-buffer resources
+    gBufferResources_ = std::make_unique<ResourcesGBuffer>();
+
+    GBufferConfig gBufferConfig;
+    gBufferConfig.width = width_;
+    gBufferConfig.height = height_;
+    gBufferConfig.ssaoKernelSize = 64;
+    gBufferConfig.noiseSize = 4;
+
+    try {
+        gBufferResources_->create(device, physicalDevice, gBufferConfig, 2);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Application", "Failed to create G-buffer resources: %s", e.what());
+        gBufferResources_.reset();
+        return false;
+    }
+
+    // Create G-buffer pipeline
+    PipelineConfig gBufferPipelineConfig;
+    gBufferPipelineConfig.name = "gbuffer";
+    gBufferPipelineConfig.type = PipelineType::GraphicsOffScreen;
+    gBufferPipelineConfig.shaderFiles = {
+        "shaders/gbuffer/gbuffer.vert.spv",
+        "shaders/gbuffer/gbuffer.frag.spv"
+    };
+    gBufferPipelineConfig.viewportWidth = width_;
+    gBufferPipelineConfig.viewportHeight = height_;
+
+    try {
+        gBufferPipeline_ = std::make_unique<PipelineGBuffer>(
+            device, physicalDevice, gBufferPipelineConfig,
+            gBufferResources_.get(), materialSystem_.get());
+        gBufferPipeline_->setSceneManager(sceneManager_.get());
+    } catch (const std::exception& e) {
+        LOG_ERROR("Application", "Failed to create G-buffer pipeline: %s", e.what());
+        gBufferPipeline_.reset();
+        gBufferResources_.reset();
+        return false;
+    }
+
+    // Create deferred lighting pipeline
+    PipelineConfig deferredPipelineConfig;
+    deferredPipelineConfig.name = "deferred_lighting";
+    deferredPipelineConfig.type = PipelineType::GraphicsOnScreen;
+    deferredPipelineConfig.shaderFiles = {
+        "shaders/deferred/lighting.vert.spv",
+        "shaders/deferred/lighting.frag.spv"
+    };
+    deferredPipelineConfig.viewportWidth = width_;
+    deferredPipelineConfig.viewportHeight = height_;
+
+    try {
+        deferredPipeline_ = std::make_unique<PipelineDeferred>(
+            device, physicalDevice, deferredPipelineConfig,
+            gBufferResources_.get(), renderGlobals_.get(),
+            renderer_->getRenderPass());
+    } catch (const std::exception& e) {
+        LOG_ERROR("Application", "Failed to create deferred lighting pipeline: %s", e.what());
+        deferredPipeline_.reset();
+        gBufferPipeline_.reset();
+        gBufferResources_.reset();
+        return false;
+    }
+
+    LOG_INFO("Application", "Deferred rendering initialized successfully");
+    return true;
+}
+
+void Application::renderGBufferPass(VkCommandBuffer cmd, uint32_t frameIndex) {
+    if (!gBufferPipeline_ || !gBufferResources_) {
+        return;
+    }
+
+    // Update camera UBO for G-buffer pipeline
+    if (activeCamera_ && renderGlobals_) {
+        renderGlobals_->updateCamera(frameIndex, *activeCamera_);
+
+        // Convert to CameraUBO format for G-buffer pipeline
+        CameraUBO cameraUBO;
+        cameraUBO.view = activeCamera_->getViewMatrix().get();
+        cameraUBO.projection = activeCamera_->getProjectionMatrix().get();
+        cameraUBO.viewProjection = cameraUBO.projection * cameraUBO.view;
+        
+        const math::Vector3& camPos = activeCamera_->getPosition();
+        cameraUBO.cameraPosition = glm::vec4(camPos.x, camPos.y, camPos.z, 1.0f);
+        
+        float nearPlane = 0.1f;
+        float farPlane = 100.0f;
+        float fov = 45.0f;
+        float aspect = static_cast<float>(width_) / static_cast<float>(height_);
+        cameraUBO.nearFarFov = glm::vec4(nearPlane, farPlane, fov, aspect);
+        
+        gBufferPipeline_->setCameraUBO(cameraUBO, frameIndex);
+    }
+
+    // Execute G-buffer pass
+    gBufferPipeline_->fillCommandBuffer(cmd, frameIndex);
+}
+
+void Application::renderDeferredPass(uint32_t frameIndex) {
+    if (!deferredPipeline_ || !gBufferResources_ || !activeCamera_) {
+        return;
+    }
+
+    // Update camera uniforms
+    if (renderGlobals_) {
+        renderGlobals_->updateCamera(frameIndex, *activeCamera_);
+    }
+
+    // Update light uniforms
+    if (renderGlobals_ && lightManager_) {
+        renderGlobals_->updateLights(frameIndex, *lightManager_);
+    }
+
+    // Update shadow matrices if shadows are enabled
+    if (shadowsEnabled_ && shadowResources_ && lightManager_) {
+        updateShadowMatrices(frameIndex);
+    }
+
+    // Get command buffer
+    VkCommandBuffer cmd = renderer_->getCurrentCommandBuffer();
+
+    // Update deferred push constants from render settings
+    DeferredPushConstants& pc = deferredPipeline_->getPushConstantsMutable();
+    pc.directLightIntensity = pbrPushConstants_.directLightIntensity;
+    pc.ambientIntensity = renderSettings_.ambientIntensity;
+    pc.exposure = renderSettings_.exposure;
+    pc.maxReflectionLod = pbrPushConstants_.maxReflectionLod;
+    pc.lightFalloff = renderSettings_.lightFalloff;
+    pc.albedoMultiplier = renderSettings_.albedoMultiplier;
+    pc.shadowIntensity = pbrPushConstants_.shadowIntensity;
+    pc.flags = pbrDebugFlags_;
+
+    // Disable IBL flag if IBL is disabled
+    if (!renderSettings_.iblEnabled) {
+        // Must match shader flag bit in `pbr_enhanced.frag` / deferred lighting shader
+        pc.flags |= (1u << 2);  // FLAG_DISABLE_IBL
+    }
+
+    // Execute deferred lighting pass
+    deferredPipeline_->fillCommandBuffer(cmd, frameIndex);
+}
+
+VkDevice Application::getVulkanDevice() {
+    return renderer_ ? renderer_->getDevice() : VK_NULL_HANDLE;
+}
+
+VkPhysicalDevice Application::getVulkanPhysicalDevice() {
+    return renderer_ ? renderer_->getPhysicalDevice() : VK_NULL_HANDLE;
+}
+
+VmaAllocator Application::getVulkanAllocator() {
+    return renderer_ ? renderer_->getAllocator() : VK_NULL_HANDLE;
+}
+
+VkCommandPool Application::getVulkanCommandPool() {
+    return renderer_ ? renderer_->getCommandPool() : VK_NULL_HANDLE;
+}
+
+VkQueue Application::getVulkanGraphicsQueue() {
+    return renderer_ ? renderer_->getGraphicsQueue() : VK_NULL_HANDLE;
+}
+
+VkRenderPass Application::getVulkanRenderPass() {
+    return renderer_ ? renderer_->getRenderPass() : VK_NULL_HANDLE;
+}
+
+SDL_Window* Application::getWindow() {
+    return window_ ? static_cast<SDL_Window*>(window_->getNativeHandle()) : nullptr;
 }
 
 } // namespace rendering

@@ -74,7 +74,10 @@ public:
     /**
      * @brief Check if resources are valid
      */
-    bool isValid() const override { return position_.valid() && normal_.valid(); }
+    bool isValid() const override { 
+        return position_.valid() && normal_.valid() && 
+               albedo_.valid() && material_.valid() && emissive_.valid(); 
+    }
 
     /**
      * @brief Get noise texture dimension
@@ -90,6 +93,15 @@ public:
 
     GPUImage& getNormalTexture() { return normal_; }
     const GPUImage& getNormalTexture() const { return normal_; }
+
+    GPUImage& getAlbedoTexture() { return albedo_; }
+    const GPUImage& getAlbedoTexture() const { return albedo_; }
+
+    GPUImage& getMaterialTexture() { return material_; }
+    const GPUImage& getMaterialTexture() const { return material_; }
+
+    GPUImage& getEmissiveTexture() { return emissive_; }
+    const GPUImage& getEmissiveTexture() const { return emissive_; }
 
     GPUImage& getNoiseTexture() { return noise_; }
     const GPUImage& getNoiseTexture() const { return noise_; }
@@ -117,6 +129,9 @@ public:
 private:
     void createPositionTexture();
     void createNormalTexture();
+    void createAlbedoTexture();
+    void createMaterialTexture();
+    void createEmissiveTexture();
     void createNoiseTexture();
     void createSSAOTexture();
     void createDepthTexture();
@@ -136,6 +151,9 @@ private:
     // G-buffer textures (view-space)
     GPUImage position_;  // XYZ = view-space pos, W = linear depth (1=foreground, 0=background)
     GPUImage normal_;    // RGB = view-space normal
+    GPUImage albedo_;    // RGB = albedo, A = metallic
+    GPUImage material_;  // R = roughness, G = occlusion
+    GPUImage emissive_;  // RGB = emissive, A = unused
     GPUImage depth_;     // Depth buffer for G-buffer pass
 
     // SSAO resources

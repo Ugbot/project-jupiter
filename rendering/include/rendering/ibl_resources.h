@@ -97,6 +97,17 @@ public:
      * Used in shader for textureLod(..., roughness * maxLod)
      */
     uint32_t getMaxReflectionLod() const;
+    
+    /**
+     * @brief Get environment cubemap for skybox rendering
+     * @return Pointer to environment cubemap texture, or nullptr if not generated
+     */
+    VulkanTexture* getEnvironmentMap() const;
+    
+    /**
+     * @brief Check if IBL was generated from HDR (has environment map for skybox)
+     */
+    bool hasEnvironmentMap() const;
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
@@ -127,6 +138,21 @@ private:
      * GGX importance sampling for different roughness levels (mipmaps)
      */
     bool filterSpecularPrefiltered(VkCommandPool commandPool, VkQueue queue);
+
+    /**
+     * @brief Load pre-baked BRDF LUT from cache file
+     * Industry best practice: BRDF LUT is environment-independent, cache to disk
+     */
+    bool loadBRDFLUTFromCache(VkDevice device, VmaAllocator allocator,
+                              VkCommandPool commandPool, VkQueue queue,
+                              const std::string& cachePath);
+
+    /**
+     * @brief Save generated BRDF LUT to cache file for future runs
+     */
+    void saveBRDFLUTToCache(VkDevice device, VkCommandPool commandPool,
+                            VkQueue queue, const std::string& cachePath,
+                            uint32_t size);
 };
 
 } // namespace rendering

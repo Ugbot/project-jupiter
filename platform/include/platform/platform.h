@@ -517,6 +517,12 @@ public:
      * @return 0 on success, non-zero on failure
      */
     virtual int createVulkanSurface(void* instance, void** surface) = 0;
+    
+    /**
+     * @brief Get the native window handle (platform-specific)
+     * @return Native window handle (SDL_Window* on SDL platforms)
+     */
+    virtual void* getNativeHandle() = 0;
 };
 
 /**

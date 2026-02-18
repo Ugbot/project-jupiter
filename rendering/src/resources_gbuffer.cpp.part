@@ -1,0 +1,28 @@
+void ResourcesGBuffer::createAlbedoTexture() {
+    // RGBA8_SRGB for albedo + metallic (A)
+    createImage(device_, physicalDevice_, config_.width, config_.height,
+                VK_FORMAT_R8G8B8A8_SRGB,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                albedo_);
+    createImageView(device_, albedo_, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void ResourcesGBuffer::createMaterialTexture() {
+    // RGBA8_UNORM for roughness (R) + AO (G) + unused (B, A)
+    createImage(device_, physicalDevice_, config_.width, config_.height,
+                VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                material_);
+    createImageView(device_, material_, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void ResourcesGBuffer::createEmissiveTexture() {
+    // R16G16B16A16_SFLOAT for emissive (RGB) + unused (A)
+    createImage(device_, physicalDevice_, config_.width, config_.height,
+                VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                emissive_);
+    createImageView(device_, emissive_, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void ResourcesGBuffer::createDepthTexture() {

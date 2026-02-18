@@ -26,11 +26,13 @@ struct PBRPushConstants {
     float exposure = 1.0f;               ///< Manual exposure multiplier
     float shadowIntensity = 1.0f;        ///< Shadow darkness (0=no shadow, 1=full shadow)
     
+    // IBL parameters (from HelloVulkan)
+    float maxReflectionLod = 4.0f;       ///< Max mip level for prefiltered IBL map
+    float lightFalloff = 1.0f;           ///< Light attenuation power (lower = slower falloff)
+    float albedoMultiplier = 0.0f;       ///< Add albedo color to dark scenes (0=disabled)
+    
     // Feature flags (packed as bits)
     uint32_t flags = 0;
-    
-    // Padding to align to 16 bytes
-    float _padding[3] = {0.0f, 0.0f, 0.0f};
     
     // Flag bits
     static constexpr uint32_t FLAG_USE_ROUGHNESS_OVERRIDE = 1 << 0;
@@ -42,6 +44,13 @@ struct PBRPushConstants {
     static constexpr uint32_t FLAG_DEBUG_METALLIC = 1 << 6;
     static constexpr uint32_t FLAG_DEBUG_ROUGHNESS = 1 << 7;
     static constexpr uint32_t FLAG_DEBUG_AO = 1 << 8;
+    static constexpr uint32_t FLAG_DEBUG_UV = 1 << 9;
+    static constexpr uint32_t FLAG_DEBUG_EMISSIVE = 1 << 10;
+    static constexpr uint32_t FLAG_DISABLE_DIRECT_LIGHT = 1 << 11;
+    static constexpr uint32_t FLAG_DISABLE_TONEMAPPING = 1 << 12;
+    static constexpr uint32_t FLAG_DEBUG_DIFFUSE_ONLY = 1 << 13;
+    static constexpr uint32_t FLAG_DEBUG_SPECULAR_ONLY = 1 << 14;
+    static constexpr uint32_t FLAG_DEBUG_F0 = 1 << 15;
     
     // Helper methods
     void setRoughnessOverride(float roughness) {

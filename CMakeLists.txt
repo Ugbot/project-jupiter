@@ -14,6 +14,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Build options
 option(BUILD_SHARED_LIBS "Build shared libraries (DLLs) instead of static libraries" OFF)
 option(BUILD_PROJECTS "Build example projects" ON)
+option(JUPITER_ENABLE_TRACY "Enable Tracy profiler instrumentation" ON)
+
+include(CTest)
 
 # Set output directories
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -22,6 +25,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Vendored third-party dependencies (must be built first)
 add_subdirectory(vendored)
+
+# Profiling utilities (Tracy wrapper)
+add_subdirectory(profiling)
 
 # Add core libraries
 add_subdirectory(platform)
@@ -43,6 +49,7 @@ add_subdirectory(core)
 add_subdirectory(networking)
 add_subdirectory(ui)
 add_subdirectory(scripting)
+add_subdirectory(voxel)
 
 # Copy assets to build directory
 add_custom_target(copy_assets ALL
@@ -55,4 +62,8 @@ add_custom_target(copy_assets ALL
 # Add projects if enabled
 if(BUILD_PROJECTS)
     add_subdirectory(projects)
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()

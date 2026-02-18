@@ -1,0 +1,96 @@
+#version 450
+
+// Trail update compute shader
+// Handles trail relaxation and event stamping
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Inputs (previous frame)
+layout(set=0, binding=0) uniform sampler2D prevIntensity;
+layout(set=0, binding=1) uniform sampler2D prevDir;
+
+// Outputs (current frame)
+layout(set=0, binding=2, r16f) uniform image2D outIntensity;
+layout(set=0, binding=3, rg16f) uniform image2D outDir;
+
+// Trail events
+struct TrailEvent {
+    vec4 pos_radius;   // x=worldX, y=worldZ, z=radiusMeters, w=intensity
+    vec4 dir_bend;     // x=dirX, y=dirZ, z=bendStrength, w=flattenStrength
+};
+
+layout(std430, set=0, binding=4) readonly buffer TrailEvents {
+    TrailEvent events[];
+};
+
+// Parameters
+layout(push_constant) uniform TrailParams {
+    vec2 prevOrigin;
+    vec2 newOrigin;
+    float worldSize;
+    float invWorldSize;
+    float dtSeconds;
+    float relaxSeconds;
+    uint eventCount;
+    uint resolution;
+} params;
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Bounds check
+    if (any(greaterThanEqual(texel, imageSize(outIntensity)))) {
+        return;
+    }
+    
+    // Current texel → world position
+    vec2 uv = (vec2(texel) + 0.5) / vec2(params.resolution);
+    vec2 worldXZ = params.newOrigin + uv * params.worldSize;
+    
+    // Sample previous field (scrolled UV to handle origin movement)
+    vec2 prevUV = (worldXZ - params.prevOrigin) * params.invWorldSize;
+    float I = 0.0;
+    vec2 D = vec2(0.0);
+    
+    if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
+        I = texture(prevIntensity, prevUV).r;
+        D = texture(prevDir, prevUV).rg;
+    }
+    
+    // Exponential decay toward zero
+    float k = clamp(params.dtSeconds / max(params.relaxSeconds, 0.001), 0.0, 1.0);
+    I = mix(I, 0.0, k);
+    D = mix(D, vec2(0.0), k);
+    
+    // Stamp trail events
+    for (uint e = 0; e < params.eventCount; ++e) {
+        vec2 eventPos = events[e].pos_radius.xy;
+        float radius = events[e].pos_radius.z;
+        float stampI = events[e].pos_radius.w;
+        
+        vec2 delta = worldXZ - eventPos;
+        float dist = length(delta);
+        
+        if (dist < radius) {
+            float falloff = 1.0 - (dist / radius);
+            
+            vec2 dir = normalize(events[e].dir_bend.xy + vec2(1e-6));
+            float bendS = events[e].dir_bend.z;
+            float flatS = events[e].dir_bend.w;
+            
+            float addI = stampI * falloff;
+            
+            // Max blend for intensity
+            I = max(I, addI * flatS);
+            
+            // Weighted blend for direction
+            float w = clamp(addI * bendS, 0.0, 1.0);
+            D = normalize(mix(D, dir, w) + vec2(1e-6));
+        }
+    }
+    
+    // Write outputs
+    imageStore(outIntensity, texel, vec4(I, 0.0, 0.0, 0.0));
+    imageStore(outDir, texel, vec4(D, 0.0, 0.0));
+}
+

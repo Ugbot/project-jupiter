@@ -134,3 +134,11 @@ float ResourcesExposure::getCurrentExposure(uint32_t frameIndex) const {
 } // namespace rendering
 } // namespace jupiter
 
+
+
+
+
+
+
+
+

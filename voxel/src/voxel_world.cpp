@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cmath>
 #include <chrono>
+#include <cstring>
 
 namespace jupiter {
 namespace voxel {
@@ -85,6 +86,9 @@ bool VoxelWorld::initialize(const VoxelWorldConfig& config) {
     // Pre-allocate converted vertices buffer
     convertedVertices_ = std::make_unique<VoxelVertex[]>(MAX_CONVERTED_VERTICES);
 
+    // Pre-allocate raw stb vertices buffer for raw mesh callback
+    rawStbVertices_ = std::make_unique<StbVoxelVertex[]>(MAX_CONVERTED_VERTICES);
+
     printf("VoxelWorld::initialize: done\n");
     fflush(stdout);
 
@@ -104,6 +108,7 @@ void VoxelWorld::shutdown() {
     chunkPool_->shutdown();
 
     // Release all heap allocations
+    rawStbVertices_.reset();
     convertedVertices_.reset();
     mesher_.reset();
     meshBufferPool_.reset();
@@ -129,7 +134,31 @@ void VoxelWorld::update(const glm::vec3& cameraPos, float deltaTime) {
     auto isLoaded = [this](const ChunkCoord& coord) {
         return isChunkLoaded(coord);
     };
-    streamingManager_->update(cameraPos, isLoaded);
+    bool cameraMovedChunk = streamingManager_->update(cameraPos, isLoaded);
+
+    // Check for chunks to unload when camera moves to new chunk
+    // Use a hysteresis margin to avoid thrashing at boundaries
+    if (cameraMovedChunk) {
+        const int viewDist = streamingManager_->getViewDistance();
+        const int unloadDist = viewDist + 2;  // Unload margin beyond view distance
+
+        // Iterate loaded chunks and request unload for those out of range
+        chunkMap_->forEach([&](const ChunkCoord& coord, uint32_t poolIndex) {
+            if (!streamingManager_->isInViewDistance(coord, cameraPos)) {
+                // Double check with unload margin
+                ChunkCoord cameraChunk = worldToChunk(cameraPos);
+                int dx = coord.x - cameraChunk.x;
+                int dy = coord.y - cameraChunk.y;
+                int dz = coord.z - cameraChunk.z;
+                float dist = std::sqrt(static_cast<float>(dx*dx + dy*dy + dz*dz));
+
+                if (dist > static_cast<float>(unloadDist)) {
+                    streamingManager_->requestUnload(coord);
+                }
+            }
+            return true;  // Continue iteration
+        });
+    }
 
     // Process load requests
     ChunkLoadRequest loadReq;
@@ -415,11 +444,14 @@ void VoxelWorld::meshChunk(const ChunkCoord& coord, uint32_t poolIndex) {
     MeshResult result;
     uint32_t totalVertices = 0;
 
+    // Store first scale for raw callback (all calls should have same scale)
+    glm::vec3 meshScale(1.0f);
+
     do {
         result = mesher_->meshify();
 
-        if (result.numVertices > 0 && meshCallback_) {
-            // Convert stb vertices to our format
+        if (result.numVertices > 0) {
+            // Get raw stb vertices
             const StbVoxelVertex* stbVerts = mesher_->getStbVertexBuffer();
 
             // Ensure we don't overflow the pre-allocated buffer
@@ -428,17 +460,41 @@ void VoxelWorld::meshChunk(const ChunkCoord& coord, uint32_t poolIndex) {
                 vertsToCopy = MAX_CONVERTED_VERTICES - totalVertices;
             }
 
-            VoxelMesher::convertMesh(stbVerts, vertsToCopy,
-                                    convertedVertices_.get() + totalVertices,
-                                    coord, result.scale);
+            // Store scale from first result
+            if (totalVertices == 0) {
+                meshScale = result.scale;
+            }
+
+            // Copy raw stb vertices for raw callback
+            if (rawMeshCallback_) {
+                std::memcpy(rawStbVertices_.get() + totalVertices,
+                           stbVerts, vertsToCopy * sizeof(StbVoxelVertex));
+            }
+
+            // Convert to VoxelVertex format for existing callback
+            if (meshCallback_) {
+                VoxelMesher::convertMesh(stbVerts, vertsToCopy,
+                                        convertedVertices_.get() + totalVertices,
+                                        coord, result.scale);
+            }
+
             totalVertices += vertsToCopy;
         }
     } while (!result.volumeDone && totalVertices < MAX_CONVERTED_VERTICES);
 
+    // Notify raw mesh callback with accumulated raw vertices
+    if (totalVertices > 0 && rawMeshCallback_) {
+        rawMeshCallback_(coord, poolIndex,
+                        rawStbVertices_.get(),
+                        totalVertices,
+                        meshScale,
+                        result.aabbMin, result.aabbMax);
+    }
+
     // Release buffer back to pool
     meshBufferPool_->release(meshBuffer);
 
-    // Notify callback with full mesh
+    // Notify converted mesh callback
     if (totalVertices > 0 && meshCallback_) {
         meshCallback_(coord, poolIndex,
                      convertedVertices_.get(),

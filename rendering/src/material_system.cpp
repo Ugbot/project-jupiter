@@ -11,14 +11,15 @@ MaterialSystem::~MaterialSystem() {
     destroy();
 }
 
-bool MaterialSystem::initialize(VkDevice device, uint32_t maxMaterials) {
-    if (device == VK_NULL_HANDLE || maxMaterials == 0) {
+bool MaterialSystem::initialize(VkDevice device, VmaAllocator allocator, uint32_t maxMaterials) {
+    if (device == VK_NULL_HANDLE || allocator == VK_NULL_HANDLE || maxMaterials == 0) {
         return false;
     }
 
     destroy();
 
     device_ = device;
+    allocator_ = allocator;
     maxMaterials_ = maxMaterials;
 
     // Create descriptor set layout
@@ -63,6 +64,7 @@ void MaterialSystem::destroy() {
     }
 
     device_ = VK_NULL_HANDLE;
+    allocator_ = VK_NULL_HANDLE;
 }
 
 Material* MaterialSystem::createMaterial(const assets::MaterialAsset& materialAsset,
@@ -73,7 +75,7 @@ Material* MaterialSystem::createMaterial(const assets::MaterialAsset& materialAs
 
     Material* material = new Material();
 
-    if (!material->createFromAsset(device_, descriptorPool_, descriptorSetLayout_,
+    if (!material->createFromAsset(device_, allocator_, descriptorPool_, descriptorSetLayout_,
                                    materialAsset, textures)) {
         delete material;
         return nullptr;
@@ -175,16 +177,30 @@ bool MaterialSystem::createDescriptorSetLayout() {
     bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[5].pImmutableSamplers = nullptr;
 
+    // Tell MoltenVK to NOT use argument buffers for this set
+    // (fixes "Argument buffer resource base type" error on macOS)
+    std::array<VkDescriptorBindingFlags, 6> bindingFlags = {};
+    for (auto& flag : bindingFlags) {
+        flag = 0;  // No special flags - use regular descriptor sets
+    }
+    
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo = {};
+    bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    bindingFlagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
+    bindingFlagsInfo.pBindingFlags = bindingFlags.data();
+
     VkDescriptorSetLayoutCreateInfo layoutInfo = {};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
     layoutInfo.pBindings = bindings.data();
+    layoutInfo.pNext = &bindingFlagsInfo;  // Add binding flags
 
     if (vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr,
                                    &descriptorSetLayout_) != VK_SUCCESS) {
         return false;
     }
 
+    LOG_INFO("MaterialSystem", "Created descriptor set layout (MoltenVK compatible)");
     return true;
 }
 

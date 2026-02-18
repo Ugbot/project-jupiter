@@ -40,22 +40,22 @@ layout(push_constant) uniform VoxelChunkPushConstant {
 } chunk;
 
 // Face normals lookup table (6 axis-aligned directions)
-// stb_voxel_render normal indices: 0=east(+x), 1=north(+y), 2=west(-x), 3=south(-y), 4=up(+z), 5=down(-z)
+// Matches FaceDirection enum: FACE_POS_X=0, FACE_NEG_X=1, FACE_POS_Y=2, FACE_NEG_Y=3, FACE_POS_Z=4, FACE_NEG_Z=5
 const vec3 FACE_NORMALS[6] = vec3[6](
-    vec3( 1.0,  0.0,  0.0),   // 0: +X (East)
-    vec3( 0.0,  1.0,  0.0),   // 1: +Y (North)
-    vec3(-1.0,  0.0,  0.0),   // 2: -X (West)
-    vec3( 0.0, -1.0,  0.0),   // 3: -Y (South)
-    vec3( 0.0,  0.0,  1.0),   // 4: +Z (Up)
-    vec3( 0.0,  0.0, -1.0)    // 5: -Z (Down)
+    vec3( 1.0,  0.0,  0.0),   // 0: +X
+    vec3(-1.0,  0.0,  0.0),   // 1: -X
+    vec3( 0.0,  1.0,  0.0),   // 2: +Y
+    vec3( 0.0, -1.0,  0.0),   // 3: -Y
+    vec3( 0.0,  0.0,  1.0),   // 4: +Z
+    vec3( 0.0,  0.0, -1.0)    // 5: -Z
 );
 
 // Face tangents lookup table (for normal mapping in PBR)
-// Tangent points in the UV "U" direction for each face
+// Matches FaceDirection enum: FACE_POS_X=0, FACE_NEG_X=1, FACE_POS_Y=2, FACE_NEG_Y=3, FACE_POS_Z=4, FACE_NEG_Z=5
 const vec3 FACE_TANGENTS[6] = vec3[6](
     vec3( 0.0,  0.0, -1.0),   // 0: +X face -> tangent = -Z
-    vec3( 1.0,  0.0,  0.0),   // 1: +Y face -> tangent = +X
-    vec3( 0.0,  0.0,  1.0),   // 2: -X face -> tangent = +Z
+    vec3( 0.0,  0.0,  1.0),   // 1: -X face -> tangent = +Z
+    vec3( 1.0,  0.0,  0.0),   // 2: +Y face -> tangent = +X
     vec3(-1.0,  0.0,  0.0),   // 3: -Y face -> tangent = -X
     vec3( 1.0,  0.0,  0.0),   // 4: +Z face -> tangent = +X
     vec3( 1.0,  0.0,  0.0)    // 5: -Z face -> tangent = +X

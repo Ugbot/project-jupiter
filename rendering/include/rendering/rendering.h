@@ -78,6 +78,9 @@ public:
 
     // Get the underlying platform window
     platform::Window* getPlatformWindow() const { return m_window.get(); }
+    
+    // Get native handle (SDL_Window* for SDL platforms)
+    void* getNativeHandle() const;
 
 private:
     std::unique_ptr<platform::Window> m_window;

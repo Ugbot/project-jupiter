@@ -1,0 +1,95 @@
+{
+  "biomes": [
+    {
+      "name": "Plains",
+      "identifier": "plains",
+      "baseHeight": 64,
+      "heightVariation": 8,
+      "noiseFrequency": 0.01,
+      "surfaceBlock": "grass",
+      "subsurfaceBlock": "dirt",
+      "subsurfaceDepth": 3,
+      "fillBlock": "stone",
+      "layers": [
+        { "minHeight": 0, "maxHeight": 0, "block": "bedrock" },
+        { "minHeight": 1, "maxHeight": 5, "block": "stone", "noiseThreshold": 0.95, "alternateBlock": "coal_ore" }
+      ]
+    },
+    {
+      "name": "Mountains",
+      "identifier": "mountains",
+      "baseHeight": 80,
+      "heightVariation": 40,
+      "noiseFrequency": 0.015,
+      "surfaceBlock": "stone",
+      "subsurfaceBlock": "stone",
+      "subsurfaceDepth": 0,
+      "fillBlock": "stone",
+      "layers": [
+        { "minHeight": 0, "maxHeight": 0, "block": "bedrock" },
+        { "minHeight": 10, "maxHeight": 30, "block": "stone", "noiseThreshold": 0.92, "alternateBlock": "iron_ore" }
+      ]
+    },
+    {
+      "name": "Desert",
+      "identifier": "desert",
+      "baseHeight": 64,
+      "heightVariation": 4,
+      "noiseFrequency": 0.008,
+      "surfaceBlock": "sand",
+      "subsurfaceBlock": "sand",
+      "subsurfaceDepth": 5,
+      "fillBlock": "stone",
+      "layers": [
+        { "minHeight": 0, "maxHeight": 0, "block": "bedrock" }
+      ]
+    },
+    {
+      "name": "Forest",
+      "identifier": "forest",
+      "baseHeight": 68,
+      "heightVariation": 12,
+      "noiseFrequency": 0.012,
+      "surfaceBlock": "grass",
+      "subsurfaceBlock": "dirt",
+      "subsurfaceDepth": 4,
+      "fillBlock": "stone",
+      "layers": [
+        { "minHeight": 0, "maxHeight": 0, "block": "bedrock" },
+        { "minHeight": 1, "maxHeight": 10, "block": "stone", "noiseThreshold": 0.98, "alternateBlock": "coal_ore" }
+      ]
+    },
+    {
+      "name": "Ocean",
+      "identifier": "ocean",
+      "baseHeight": 32,
+      "heightVariation": 8,
+      "noiseFrequency": 0.005,
+      "surfaceBlock": "sand",
+      "subsurfaceBlock": "sand",
+      "subsurfaceDepth": 3,
+      "fillBlock": "stone",
+      "layers": [
+        { "minHeight": 0, "maxHeight": 0, "block": "bedrock" },
+        { "minHeight": 33, "maxHeight": 63, "block": "water" }
+      ]
+    },
+    {
+      "name": "Tundra",
+      "identifier": "tundra",
+      "baseHeight": 66,
+      "heightVariation": 6,
+      "noiseFrequency": 0.01,
+      "surfaceBlock": "stone",
+      "subsurfaceBlock": "dirt",
+      "subsurfaceDepth": 2,
+      "fillBlock": "stone",
+      "layers": [
+        { "minHeight": 0, "maxHeight": 0, "block": "bedrock" }
+      ]
+    }
+  ]
+}
+
+
+

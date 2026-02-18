@@ -132,6 +132,10 @@ public:
     SDL_Window* getNativeWindow() const {
         return window_;
     }
+    
+    void* getNativeHandle() override {
+        return static_cast<void*>(window_);
+    }
 
 private:
     SDL_Window* window_;

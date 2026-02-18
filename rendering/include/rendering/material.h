@@ -91,6 +91,7 @@ public:
      * Textures must already be uploaded to GPU (VulkanTexture instances).
      *
      * @param device Vulkan device
+     * @param allocator VMA allocator for UBO creation
      * @param descriptorPool Descriptor pool for allocation
      * @param descriptorSetLayout Material descriptor set layout (Set 1)
      * @param materialAsset CPU material asset data
@@ -98,6 +99,7 @@ public:
      * @return true if successful
      */
     bool createFromAsset(VkDevice device,
+                        VmaAllocator allocator,
                         VkDescriptorPool descriptorPool,
                         VkDescriptorSetLayout descriptorSetLayout,
                         const assets::MaterialAsset& materialAsset,

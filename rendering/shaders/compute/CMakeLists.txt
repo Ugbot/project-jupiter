@@ -16,6 +16,8 @@ set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # List of compute shaders to compile
 set(COMPUTE_SHADERS
     frustum_culling.comp
+    trail_update.comp
+    grass_generate.comp
 )
 
 # Compile compute shaders

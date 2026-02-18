@@ -22,3 +22,15 @@
 [submodule "vendored/tracy"]
 	path = vendored/tracy
 	url = https://github.com/wolfpld/tracy
+[submodule "vendored/vk-gltf-viewer"]
+	path = vendored/vk-gltf-viewer
+	url = https://github.com/stripe2933/vk-gltf-viewer.git
+[submodule "vendored/metal-cpp"]
+	path = vendored/metal-cpp
+	url = https://github.com/bkaradzic/metal-cpp.git
+[submodule "vendored/spirv-cross"]
+	path = vendored/spirv-cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+[submodule "vendored/godot_voxel"]
+	path = vendored/godot_voxel
+	url = https://github.com/Zylann/godot_voxel.git

@@ -288,5 +288,60 @@ struct Vertex3DSkinned {
     }
 };
 
+/**
+ * @brief stb_voxel_render Mode 30 vertex format (8 bytes)
+ *
+ * Direct output from stb_voxel_render - no conversion needed.
+ * This is the most efficient format for voxel rendering.
+ *
+ * attr_vertex (32 bits):
+ *   bits 0-6:   X position (0-127)
+ *   bits 7-13:  Y position (0-127)
+ *   bits 14-22: Z position (0-511)
+ *   bits 23-28: Ambient occlusion (0-63)
+ *   bits 29-31: Texture lerp (0-7)
+ *
+ * attr_face (32 bits):
+ *   bits 0-5:   Color/material index (0-63)
+ *   bits 6-10:  Normal index (0-31, only 0-5 used for cube faces)
+ *   bits 11+:   Texture coordinates, etc.
+ *
+ * Total size: 8 bytes (optimal for GPU cache, direct stb output)
+ */
+struct VoxelVertexGPU {
+    uint32_t attr_vertex;  // Packed position + AO + texlerp
+    uint32_t attr_face;    // Face data (normal, color, tex)
+
+    static VertexInputDescription getDescription() {
+        VertexInputDescription desc;
+
+        VkVertexInputBindingDescription binding = {};
+        binding.binding = 0;
+        binding.stride = sizeof(VoxelVertexGPU);
+        binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        desc.bindings.push_back(binding);
+
+        // Attribute 0: attr_vertex (location 0) - packed position + AO
+        VkVertexInputAttributeDescription attr0 = {};
+        attr0.binding = 0;
+        attr0.location = 0;
+        attr0.format = VK_FORMAT_R32_UINT;
+        attr0.offset = offsetof(VoxelVertexGPU, attr_vertex);
+        desc.attributes.push_back(attr0);
+
+        // Attribute 1: attr_face (location 1) - packed face data
+        VkVertexInputAttributeDescription attr1 = {};
+        attr1.binding = 0;
+        attr1.location = 1;
+        attr1.format = VK_FORMAT_R32_UINT;
+        attr1.offset = offsetof(VoxelVertexGPU, attr_face);
+        desc.attributes.push_back(attr1);
+
+        return desc;
+    }
+};
+
+static_assert(sizeof(VoxelVertexGPU) == 8, "VoxelVertexGPU must be 8 bytes");
+
 } // namespace rendering
 } // namespace jupiter

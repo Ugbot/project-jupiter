@@ -8,6 +8,7 @@
 
 #include "rendering/application.h"
 #include "rendering/pipeline_voxel.h"
+#include "rendering/resources_shadow.h"
 #include "rendering/camera.h"
 #include "logging/logging.h"
 #include "math/math.h"
@@ -89,12 +90,33 @@ protected:
             VK_FORMAT_D32_SFLOAT
         );
 
-        // Set lighting
+        // Set lighting - directional sun
+        sunDirection_ = glm::normalize(glm::vec3(-0.4f, -0.8f, -0.3f));
         VoxelLightUBO light;
-        light.sunDirection = glm::vec4(glm::normalize(glm::vec3(-0.4f, -0.8f, -0.3f)), 3.0f);
+        light.sunDirection = glm::vec4(sunDirection_, 3.0f);
         light.sunColor = glm::vec4(1.0f, 0.95f, 0.85f, 1.0f);
         light.ambientColor = glm::vec4(0.3f, 0.35f, 0.45f, 1.0f);
         voxelPipeline_->setLightUBO(light);
+
+        // Initialize shadow mapping
+        ShadowMapConfig shadowConfig;
+        shadowConfig.resolution = 2048;
+        shadowConfig.nearPlane = 1.0f;
+        shadowConfig.farPlane = 2000.0f;
+        shadowConfig.orthoSize = 500.0f;  // Large enough to cover visible terrain
+        shadowConfig.minBias = 0.001f;
+        shadowConfig.maxBias = 0.01f;
+
+        shadowResources_ = std::make_unique<ResourcesShadow>();
+        shadowResources_->create(
+            renderer->getDevice(),
+            renderer->getPhysicalDevice(),
+            shadowConfig,
+            2  // frames in flight
+        );
+
+        voxelPipeline_->enableShadowMapping(shadowResources_.get());
+        LOG_INFO("VoxelLOD", "Shadow mapping enabled");
 
         // Initialize VisTree
         VisTreeConfig treeConfig;
@@ -223,11 +245,31 @@ protected:
         frameCount_++;
     }
 
+    void onPreRenderPass(VkCommandBuffer cmd, uint32_t frameIndex) override {
+        // Update shadow UBO BEFORE the shadow depth pass
+        // This must happen here, not in onRender(), because onPreRenderPass runs first
+        if (shadowResources_) {
+            glm::vec3 lightPos = cameraPos_ - sunDirection_ * 800.0f;
+            glm::vec3 targetPos = cameraPos_;
+            shadowResources_->updateShadowUBO(frameIndex, lightPos, sunDirection_, targetPos);
+        }
+
+        // Shadow depth pass - renders all chunks from light's perspective into shadow map
+        // This MUST happen before the main render pass begins
+        if (voxelPipeline_ && voxelPipeline_->isShadowMappingEnabled()) {
+            voxelPipeline_->fillShadowDepthBuffer(cmd, frameIndex);
+        }
+    }
+
     void onRender() override {
         if (!initialized_ || !voxelPipeline_) return;
 
         auto* renderer = getRenderer();
         if (!renderer) return;
+
+        uint32_t frameIndex = renderer->getCurrentFrameIndex();
+
+        // NOTE: Shadow UBO is updated in onPreRenderPass() before the shadow depth pass
 
         // Update camera UBO
         CameraUBO cameraUBO;
@@ -238,11 +280,12 @@ protected:
         cameraUBO.nearFarFov = glm::vec4(0.5f, 6000.0f, PI / 3.0f,
                                          static_cast<float>(getWidth()) / getHeight());
 
-        uint32_t frameIndex = renderer->getCurrentFrameIndex();
         voxelPipeline_->setCameraUBO(cameraUBO, frameIndex);
 
-        // Render
+        // Get command buffer
         VkCommandBuffer cmd = renderer->getCurrentCommandBuffer();
+
+        // Main render pass (shadow depth pass happens in onPreRenderPass)
         voxelPipeline_->fillCommandBuffer(cmd, frameIndex);
 
         // Log stats periodically
@@ -296,24 +339,33 @@ protected:
             }
         }
 
-        // Movement
+        // Movement - full 3D flying controls
         const bool* keys = SDL_GetKeyboardState(nullptr);
-        float speed = 50.0f * deltaTime;
+        float speed = 100.0f * deltaTime;
 
         if (keys[SDL_SCANCODE_LSHIFT]) speed *= 4.0f;
 
-        glm::vec3 forward(std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_));
-        glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
+        // Full 3D forward vector (includes pitch for flying)
+        glm::vec3 forward(
+            std::sin(cameraYaw_) * std::cos(cameraPitch_),
+            std::sin(cameraPitch_),
+            std::cos(cameraYaw_) * std::cos(cameraPitch_)
+        );
+        // Horizontal forward for strafing (no pitch)
+        glm::vec3 flatForward(std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_));
+        glm::vec3 right = glm::normalize(glm::cross(flatForward, glm::vec3(0, 1, 0)));
 
+        // W/S moves in look direction (including up/down)
         if (keys[SDL_SCANCODE_W]) cameraPos_ += forward * speed;
         if (keys[SDL_SCANCODE_S]) cameraPos_ -= forward * speed;
+        // A/D strafes horizontally
         if (keys[SDL_SCANCODE_A]) cameraPos_ -= right * speed;
         if (keys[SDL_SCANCODE_D]) cameraPos_ += right * speed;
+        // Space/Ctrl for pure vertical movement
         if (keys[SDL_SCANCODE_SPACE]) cameraPos_.y += speed;
         if (keys[SDL_SCANCODE_LCTRL]) cameraPos_.y -= speed;
 
-        if (cameraPos_.y < 5.0f) cameraPos_.y = 5.0f;
-
+        // No minimum height - free flying
         updateCameraTransform();
     }
 
@@ -325,6 +377,7 @@ protected:
         }
         visTree_.shutdown();
         voxelPipeline_.reset();
+        shadowResources_.reset();
     }
 
 private:
@@ -353,6 +406,8 @@ private:
 
     // Rendering
     std::unique_ptr<PipelineVoxel> voxelPipeline_;
+    std::unique_ptr<ResourcesShadow> shadowResources_;
+    glm::vec3 sunDirection_;
 
     // LOD system
     VisTree visTree_;

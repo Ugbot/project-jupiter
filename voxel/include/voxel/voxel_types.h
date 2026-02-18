@@ -20,20 +20,22 @@ namespace voxel {
 // Constants
 // ============================================================================
 
-/// Voxels per chunk dimension (16x16x16)
+/// Voxels per chunk dimension (16x16x16 cube chunks)
 constexpr int CHUNK_SIZE = 16;
+constexpr int CHUNK_HEIGHT = 16;  // Cube chunks for better culling and fewer visible chunks
 
 /// Border size for stb_voxel_render neighbor access
 constexpr int CHUNK_BORDER = 1;
 
-/// Padded chunk dimension including borders (18x18x18)
-constexpr int PADDED_SIZE = CHUNK_SIZE + 2 * CHUNK_BORDER;
+/// Padded chunk dimensions including borders
+constexpr int PADDED_SIZE = CHUNK_SIZE + 2 * CHUNK_BORDER;    // 18 for X/Z
+constexpr int PADDED_HEIGHT = CHUNK_HEIGHT + 2 * CHUNK_BORDER; // 130 for Y
 
-/// Total voxels in padded chunk data
-constexpr int VOXEL_DATA_SIZE = PADDED_SIZE * PADDED_SIZE * PADDED_SIZE;  // 5832
+/// Total voxels in padded chunk data (18 * 130 * 18 = 42,120)
+constexpr int VOXEL_DATA_SIZE = PADDED_SIZE * PADDED_HEIGHT * PADDED_SIZE;
 
 /// Maximum active chunks in memory
-constexpr size_t MAX_ACTIVE_CHUNKS = 4096;
+constexpr size_t MAX_ACTIVE_CHUNKS = 8192;
 
 /// Default view distance in chunks
 constexpr int DEFAULT_VIEW_DISTANCE = 12;

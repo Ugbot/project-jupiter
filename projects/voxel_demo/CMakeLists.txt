@@ -71,6 +71,34 @@ else()
 
     add_dependencies(voxel_demo voxel_demo_shaders)
     message(STATUS "Voxel demo shaders configured: ${VOXEL_SHADER_SOURCES}")
+
+    # Smooth terrain shaders
+    set(SMOOTH_SHADER_SOURCES
+        ${VOXEL_SHADER_DIR}/smooth_terrain.vert
+        ${VOXEL_SHADER_DIR}/smooth_terrain.frag
+    )
+
+    set(COMPILED_SMOOTH_SHADERS)
+    foreach(SHADER_SOURCE ${SMOOTH_SHADER_SOURCES})
+        get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME)
+        set(SHADER_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv)
+
+        add_custom_command(
+            OUTPUT ${SHADER_OUTPUT}
+            COMMAND ${GLSLANG_VALIDATOR} -V ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
+            DEPENDS ${SHADER_SOURCE}
+            COMMENT "Compiling smooth terrain shader ${SHADER_NAME}"
+            VERBATIM
+        )
+
+        list(APPEND COMPILED_SMOOTH_SHADERS ${SHADER_OUTPUT})
+    endforeach()
+
+    add_custom_target(smooth_world_shaders ALL
+        DEPENDS ${COMPILED_SMOOTH_SHADERS}
+        COMMENT "Compiling smooth world shaders"
+    )
+    message(STATUS "Smooth terrain shaders configured: ${SMOOTH_SHADER_SOURCES}")
 endif()
 
 set_target_properties(voxel_demo PROPERTIES
@@ -142,5 +170,39 @@ if(GLSLANG_VALIDATOR)
 endif()
 
 set_target_properties(voxel_lod_demo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# =============================================================================
+# Smooth World Demo - Marching Cubes + Perlin caves
+# =============================================================================
+
+add_executable(smooth_world_demo
+    src/smooth_world_main.cpp
+)
+
+target_include_directories(smooth_world_demo
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/rendering/src  # For vulkan_backend.h
+)
+
+target_link_libraries(smooth_world_demo
+    PRIVATE
+        rendering
+        jupiter_voxel
+        assets
+        math
+        logging
+        platform
+)
+
+# Enable logging
+target_compile_definitions(smooth_world_demo PRIVATE JUPITER_ENABLE_LOGGING)
+
+if(GLSLANG_VALIDATOR)
+    add_dependencies(smooth_world_demo smooth_world_shaders)
+endif()
+
+set_target_properties(smooth_world_demo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )

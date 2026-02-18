@@ -1,11 +1,14 @@
 #include "rendering/ibl_resources.h"
 #include "rendering/texture.h"
 #include "rendering/vulkan_compute_pipeline.h"
+#include "rendering/pipeline_ibl.h"
 #include "rendering/descriptor_builder.h"
 #include "assets/hdr_loader.h"
 #include "logging/logging.h"
+#include "profiling/profiler.h"
 
 #include <vector>
+#include <fstream>
 
 namespace jupiter {
 namespace rendering {
@@ -13,19 +16,56 @@ namespace rendering {
 bool IBLResources::generateFromHDR(VkDevice device, VmaAllocator allocator,
                                    VkCommandPool commandPool, VkQueue queue,
                                    const std::string& hdrFilepath) {
+    JUPITER_PROFILE_SCOPE("IBLResources::generateFromHDR");
     LOG_INFO("IBL", "Generating IBL resources from HDR: %s", hdrFilepath.c_str());
 
     device_ = device;
     allocator_ = allocator;
 
-    // TODO: Implement full IBL generation pipeline
-    // For now, create fallback resources
-    LOG_WARN("IBL", "Full HDR-based IBL generation not yet implemented, using fallback");
-    return createFallback(device, allocator, commandPool, queue);
+    // Build IBL pipeline once for this generation
+    PipelineIBL iblPipeline;
+    if (!iblPipeline.create(device, allocator, commandPool, queue)) {
+        LOG_ERROR("IBL", "Failed to create IBL pipeline, falling back to default");
+        return createFallback(device, allocator, commandPool, queue);
+    }
+
+    // Create environment cubemap from HDR
+    auto envMap = std::make_unique<VulkanTexture>();
+    if (!iblPipeline.convertEquirectToCubemap(hdrFilepath, envMap.get())) {
+        LOG_ERROR("IBL", "Failed to convert equirect to cubemap, falling back to default");
+        return createFallback(device, allocator, commandPool, queue);
+    }
+
+    // Store environment map for skybox and downstream filters
+    environmentMap_ = std::move(envMap);
+
+    // Generate diffuse irradiance map
+    irradianceMap_ = std::make_unique<VulkanTexture>();
+    if (!iblPipeline.filterDiffuseIrradiance(environmentMap_.get(), irradianceMap_.get())) {
+        LOG_ERROR("IBL", "Failed to filter diffuse irradiance");
+        return false;
+    }
+
+    // Generate specular prefiltered map
+    prefilteredMap_ = std::make_unique<VulkanTexture>();
+    if (!iblPipeline.filterSpecularPrefiltered(environmentMap_.get(), prefilteredMap_.get())) {
+        LOG_ERROR("IBL", "Failed to filter specular prefiltered");
+        return false;
+    }
+
+    // Generate BRDF LUT (compute)
+    if (!generateBRDFLUT(device, allocator, commandPool, queue)) {
+        LOG_ERROR("IBL", "Failed to generate BRDF LUT");
+        return false;
+    }
+
+    LOG_INFO("IBL", "IBL resources generated successfully from HDR: %s", hdrFilepath.c_str());
+    return true;
 }
 
 bool IBLResources::createFallback(VkDevice device, VmaAllocator allocator,
                                   VkCommandPool commandPool, VkQueue queue) {
+    JUPITER_PROFILE_SCOPE("IBLResources::createFallback");
     LOG_INFO("IBL", "Creating fallback IBL resources (neutral gray environment)");
 
     device_ = device;
@@ -33,10 +73,11 @@ bool IBLResources::createFallback(VkDevice device, VmaAllocator allocator,
 
     // Create neutral gray cubemaps (1x1 per face for simplicity)
     const uint32_t fallbackSize = 1;
-    const VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    const VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT;
 
-    // Neutral gray color (0.5, 0.5, 0.5, 1.0) in linear space
-    float grayPixel[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+    // Very dark gray to avoid washing out colors (0.05, 0.05, 0.05) in linear space
+    // Real IBL should be loaded for proper environment lighting
+    float grayPixel[4] = {0.08f, 0.08f, 0.08f, 1.0f};
 
     // Create 6 identical gray faces
     const void* facePixels[6] = {
@@ -144,19 +185,39 @@ uint32_t IBLResources::getMaxReflectionLod() const {
     return prefilteredMap_ ? (prefilteredMap_->getMipLevels() - 1) : 0;
 }
 
-// TODO: Implement generation methods
+VulkanTexture* IBLResources::getEnvironmentMap() const {
+    return environmentMap_.get();
+}
+
+bool IBLResources::hasEnvironmentMap() const {
+    return environmentMap_ && environmentMap_->isValid();
+}
+
+// Generate or load BRDF LUT
+// Following industry best practice: BRDF LUT is view/environment independent,
+// so generate once and cache to disk (see Ghost of Tsushima GDC talk)
 bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
                                    VkCommandPool commandPool, VkQueue queue) {
-    LOG_INFO("IBL", "Generating BRDF LUT (256x256, RG16F)...");
+    JUPITER_PROFILE_SCOPE("IBLResources::generateBRDFLUT");
 
     device_ = device;
     allocator_ = allocator;
 
     const uint32_t LUT_SIZE = 256;
     const VkFormat LUT_FORMAT = VK_FORMAT_R16G16_SFLOAT;
+    const std::string cachePath = "brdf_lut.cache";
 
-    // Create empty 2D texture for BRDF LUT with STORAGE usage
-    brdfLUT_ = std::make_unique<VulkanTexture>();
+    // Try to load pre-baked BRDF LUT from cache first
+    if (loadBRDFLUTFromCache(device, allocator, commandPool, queue, cachePath)) {
+        LOG_INFO("IBL", "Loaded BRDF LUT from cache: %s", cachePath.c_str());
+        return true;
+    }
+
+    LOG_INFO("IBL", "Generating BRDF LUT (256x256, RG16F) - this only happens once...");
+
+    // Create new texture in local variable - only assign to brdfLUT_ on success
+    // This preserves the fallback if generation fails
+    auto newBrdfLUT = std::make_unique<VulkanTexture>();
 
     // Create image with STORAGE usage for compute shader output
     VkImageCreateInfo imageInfo = {};
@@ -204,7 +265,7 @@ bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
     }
 
     // Transition image to GENERAL layout for compute shader
-    VkCommandBuffer cmd = brdfLUT_->beginSingleTimeCommands(device_, commandPool);
+    VkCommandBuffer cmd = newBrdfLUT->beginSingleTimeCommands(device_, commandPool);
 
     VkImageMemoryBarrier barrier = {};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -224,7 +285,7 @@ bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-    brdfLUT_->endSingleTimeCommands(device_, commandPool, queue, cmd);
+    newBrdfLUT->endSingleTimeCommands(device_, commandPool, queue, cmd);
 
     // Create descriptor set layout for storage image
     DescriptorSetLayoutBuilder layoutBuilder(device_);
@@ -291,7 +352,7 @@ bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
     vulkan::VulkanComputePipeline computePipeline;
     std::vector<VkDescriptorSetLayout> layouts = { descriptorSetLayout };
 
-    if (!computePipeline.create(device_, "ibl/brdf_lut.comp.spv", layouts, nullptr)) {
+    if (!computePipeline.create(device_, "shaders/ibl/brdf_lut.comp.spv", layouts, nullptr)) {
         LOG_ERROR("IBL", "Failed to create BRDF LUT compute pipeline");
         vkDestroyDescriptorPool(device_, descriptorPool, nullptr);
         vkDestroyDescriptorSetLayout(device_, descriptorSetLayout, nullptr);
@@ -302,7 +363,7 @@ bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
 
     LOG_INFO("IBL", "Starting compute shader execution...");
     // Execute compute shader
-    cmd = brdfLUT_->beginSingleTimeCommands(device_, commandPool);
+    cmd = newBrdfLUT->beginSingleTimeCommands(device_, commandPool);
     LOG_INFO("IBL", "Command buffer allocated: %p", (void*)cmd);
 
     if (cmd == VK_NULL_HANDLE) {
@@ -318,9 +379,11 @@ bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
     LOG_INFO("IBL", "Descriptor sets bound (layout=%p, set=%p)",
              (void*)computePipeline.getLayout(), (void*)descriptorSet);
 
-    // Dispatch: one workgroup per pixel (local_size = 1,1,1)
-    computePipeline.dispatch(cmd, LUT_SIZE, LUT_SIZE, 1);
-    LOG_INFO("IBL", "Dispatch completed (256x256x1 workgroups)");
+    // Dispatch: workgroups cover 16x16 pixels each (local_size = 16,16,1)
+    const uint32_t workgroupsX = (LUT_SIZE + 15) / 16;  // = 16
+    const uint32_t workgroupsY = (LUT_SIZE + 15) / 16;  // = 16
+    computePipeline.dispatch(cmd, workgroupsX, workgroupsY, 1);
+    LOG_INFO("IBL", "Dispatch completed (%ux%ux1 workgroups)", workgroupsX, workgroupsY);
 
     // Barrier: compute write -> fragment read
     barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -335,29 +398,35 @@ bool IBLResources::generateBRDFLUT(VkDevice device, VmaAllocator allocator,
 
     LOG_INFO("IBL", "Ending command buffer (device=%p, commandPool=%p, queue=%p, cmd=%p)...",
              (void*)device_, (void*)commandPool, (void*)queue, (void*)cmd);
-    brdfLUT_->endSingleTimeCommands(device_, commandPool, queue, cmd);
+    newBrdfLUT->endSingleTimeCommands(device_, commandPool, queue, cmd);
     LOG_INFO("IBL", "Command buffer submitted");
 
     // Store in VulkanTexture (bypass normal create flow)
     LOG_INFO("IBL", "Setting image data...");
-    brdfLUT_->setImageData(device_, allocator_, image, imageView, allocation,
+    newBrdfLUT->setImageData(device_, allocator_, image, imageView, allocation,
                           LUT_SIZE, LUT_SIZE, 1, 1, LUT_FORMAT);
     LOG_INFO("IBL", "Image data set");
 
     // Create sampler
     LOG_INFO("IBL", "Creating sampler...");
-    if (!brdfLUT_->createSampler(device_, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false, 1.0f)) {
+    if (!newBrdfLUT->createSampler(device_, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false, 1.0f)) {
         LOG_ERROR("IBL", "Failed to create BRDF LUT sampler");
         return false;
     }
     LOG_INFO("IBL", "Sampler created");
+
+    // Success! Replace the fallback with the compute-generated LUT
+    brdfLUT_ = std::move(newBrdfLUT);
+
+    // Save to cache for future runs (BRDF LUT is environment-independent)
+    saveBRDFLUTToCache(device, commandPool, queue, cachePath, LUT_SIZE);
 
     // Cleanup temporary resources
     computePipeline.destroy();
     vkDestroyDescriptorPool(device_, descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device_, descriptorSetLayout, nullptr);
 
-    LOG_INFO("IBL", "BRDF LUT generated successfully");
+    LOG_INFO("IBL", "BRDF LUT generated and cached successfully");
     return true;
 }
 
@@ -375,6 +444,167 @@ bool IBLResources::filterDiffuseIrradiance(VkCommandPool commandPool, VkQueue qu
 bool IBLResources::filterSpecularPrefiltered(VkCommandPool commandPool, VkQueue queue) {
     LOG_WARN("IBL", "filterSpecularPrefiltered() not yet implemented");
     return false;
+}
+
+bool IBLResources::loadBRDFLUTFromCache(VkDevice device, VmaAllocator allocator,
+                                        VkCommandPool commandPool, VkQueue queue,
+                                        const std::string& cachePath) {
+    // Check if cache file exists
+    std::ifstream file(cachePath, std::ios::binary | std::ios::ate);
+    if (!file) {
+        LOG_INFO("IBL", "No BRDF LUT cache found at: %s", cachePath.c_str());
+        return false;
+    }
+
+    // Read header
+    file.seekg(0);
+    uint32_t magic, width, height;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&width), sizeof(width));
+    file.read(reinterpret_cast<char*>(&height), sizeof(height));
+
+    if (magic != 0x4C555442) { // "BTUL" reversed
+        LOG_WARN("IBL", "Invalid BRDF LUT cache magic");
+        return false;
+    }
+
+    if (width != 256 || height != 256) {
+        LOG_WARN("IBL", "BRDF LUT cache size mismatch: %ux%u", width, height);
+        return false;
+    }
+
+    // Read pixel data (RG16F = 4 bytes per pixel)
+    const size_t dataSize = width * height * 4;
+    std::vector<char> pixelData(dataSize);
+    file.read(pixelData.data(), dataSize);
+
+    if (!file) {
+        LOG_ERROR("IBL", "Failed to read BRDF LUT cache data");
+        return false;
+    }
+    file.close();
+
+    // Create texture from cached data
+    brdfLUT_ = std::make_unique<VulkanTexture>();
+    if (!brdfLUT_->create(device, allocator, commandPool, queue,
+                          pixelData.data(), width, height,
+                          VK_FORMAT_R16G16_SFLOAT, false)) {
+        LOG_ERROR("IBL", "Failed to create texture from BRDF LUT cache");
+        brdfLUT_.reset();
+        return false;
+    }
+
+    if (!brdfLUT_->createSampler(device, VK_FILTER_LINEAR,
+                                 VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false, 1.0f)) {
+        LOG_ERROR("IBL", "Failed to create sampler for cached BRDF LUT");
+        brdfLUT_.reset();
+        return false;
+    }
+
+    return true;
+}
+
+void IBLResources::saveBRDFLUTToCache(VkDevice device, VkCommandPool commandPool,
+                                      VkQueue queue, const std::string& cachePath,
+                                      uint32_t size) {
+    if (!brdfLUT_ || !brdfLUT_->isValid()) {
+        LOG_WARN("IBL", "Cannot save BRDF LUT cache: texture not valid");
+        return;
+    }
+
+    // Note: Reading back from GPU requires staging buffer + vkCmdCopyImageToBuffer
+    // For now, we'll regenerate on each fresh install
+    // A proper implementation would readback the GPU data here
+
+    // Create staging buffer for readback
+    const size_t dataSize = size * size * 4; // RG16F = 4 bytes/pixel
+
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = dataSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocInfo = {};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+
+    VkBuffer stagingBuffer;
+    VmaAllocation stagingAllocation;
+    if (vmaCreateBuffer(allocator_, &bufferInfo, &allocInfo, &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS) {
+        LOG_WARN("IBL", "Failed to create staging buffer for BRDF LUT cache");
+        return;
+    }
+
+    // Copy image to staging buffer
+    VkCommandBuffer cmd = brdfLUT_->beginSingleTimeCommands(device, commandPool);
+
+    // Transition to transfer src
+    VkImageMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = brdfLUT_->getImage();
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region = {};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {size, size, 1};
+
+    vkCmdCopyImageToBuffer(cmd, brdfLUT_->getImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           stagingBuffer, 1, &region);
+
+    // Transition back to shader read
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    brdfLUT_->endSingleTimeCommands(device, commandPool, queue, cmd);
+
+    // Map and read data
+    void* mappedData;
+    if (vmaMapMemory(allocator_, stagingAllocation, &mappedData) != VK_SUCCESS) {
+        LOG_WARN("IBL", "Failed to map staging buffer for BRDF LUT cache");
+        vmaDestroyBuffer(allocator_, stagingBuffer, stagingAllocation);
+        return;
+    }
+
+    // Write cache file
+    std::ofstream file(cachePath, std::ios::binary);
+    if (file) {
+        uint32_t magic = 0x4C555442; // "BTUL"
+        file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+        file.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        file.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        file.write(reinterpret_cast<const char*>(mappedData), dataSize);
+        LOG_INFO("IBL", "Saved BRDF LUT cache to: %s", cachePath.c_str());
+    } else {
+        LOG_WARN("IBL", "Failed to write BRDF LUT cache file");
+    }
+
+    vmaUnmapMemory(allocator_, stagingAllocation);
+    vmaDestroyBuffer(allocator_, stagingBuffer, stagingAllocation);
 }
 
 } // namespace rendering

@@ -203,6 +203,42 @@ public:
         return static_cast<float>(size()) / BUCKET_COUNT;
     }
 
+    /**
+     * @brief Iterate over all occupied entries
+     *
+     * @param callback Function called for each entry (coord, poolIndex)
+     *                 Return false to stop iteration early
+     */
+    template<typename Callback>
+    void forEach(Callback&& callback) const {
+        for (size_t i = 0; i < BUCKET_COUNT; ++i) {
+            const Entry& entry = buckets_[i];
+            if (entry.occupied.load(std::memory_order_acquire)) {
+                if (!callback(entry.coord, entry.poolIndex)) {
+                    return;  // Early exit
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief Collect all loaded chunk coordinates
+     *
+     * @param outCoords Output array
+     * @param maxCount Maximum entries to collect
+     * @return Number of entries collected
+     */
+    size_t collectLoadedChunks(ChunkCoord* outCoords, size_t maxCount) const {
+        size_t count = 0;
+        for (size_t i = 0; i < BUCKET_COUNT && count < maxCount; ++i) {
+            const Entry& entry = buckets_[i];
+            if (entry.occupied.load(std::memory_order_acquire)) {
+                outCoords[count++] = entry.coord;
+            }
+        }
+        return count;
+    }
+
 private:
     /// Hash table entry
     struct Entry {

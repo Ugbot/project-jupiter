@@ -70,18 +70,20 @@ Material& Material::operator=(Material&& other) noexcept {
 }
 
 bool Material::createFromAsset(VkDevice device,
+                               VmaAllocator allocator,
                                VkDescriptorPool descriptorPool,
                                VkDescriptorSetLayout descriptorSetLayout,
                                const assets::MaterialAsset& materialAsset,
                                const std::unordered_map<std::string, VulkanTexture*>& textures) {
-    if (device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE ||
-        descriptorSetLayout == VK_NULL_HANDLE) {
+    if (device == VK_NULL_HANDLE || allocator == VK_NULL_HANDLE ||
+        descriptorPool == VK_NULL_HANDLE || descriptorSetLayout == VK_NULL_HANDLE) {
         return false;
     }
 
     destroy();
 
     device_ = device;
+    allocator_ = allocator;
     name_ = materialAsset.name;
 
     // Fill material properties from asset
@@ -133,6 +135,24 @@ bool Material::createFromAsset(VkDevice device,
              materialAsset.emissiveTextureUuid.c_str(), emissiveTexture_,
              foundEmissive ? "" : " (default)");
 
+    // Create UBO buffer for material properties
+    uboBuffer_ = new vulkan::VulkanBuffer();
+    if (!uboBuffer_->create(allocator_, sizeof(MaterialUBO),
+                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                           VMA_MEMORY_USAGE_CPU_TO_GPU)) {
+        LOG_ERROR("Material", "Failed to create material UBO buffer");
+        delete uboBuffer_;
+        uboBuffer_ = nullptr;
+        return false;
+    }
+
+    // Upload properties to GPU
+    uboBuffer_->upload(&properties_, sizeof(properties_));
+    LOG_INFO("Material", "Created UBO with baseColorFactor=[%.2f, %.2f, %.2f, %.2f], metallicFactor=%.2f, roughnessFactor=%.2f",
+             properties_.baseColorFactor[0], properties_.baseColorFactor[1],
+             properties_.baseColorFactor[2], properties_.baseColorFactor[3],
+             properties_.metallicFactor, properties_.roughnessFactor);
+
     // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -144,9 +164,9 @@ bool Material::createFromAsset(VkDevice device,
         return false;
     }
 
-    // Update descriptor set with textures (all 5 slots always bound)
+    // Update descriptor set with textures (5 slots) + UBO (1 slot)
     std::array<VkDescriptorImageInfo, 5> imageInfos;
-    std::array<VkWriteDescriptorSet, 5> descriptorWrites = {};
+    std::array<VkWriteDescriptorSet, 6> descriptorWrites = {};  // 5 textures + 1 UBO
 
     // Helper to add a texture binding (textures are guaranteed non-null due to defaults)
     auto addTextureBinding = [&](VulkanTexture* texture, uint32_t binding) {
@@ -179,9 +199,24 @@ bool Material::createFromAsset(VkDevice device,
     addTextureBinding(emissiveTexture_, 4);
     LOG_INFO("Material", "  Binding 4 (emissive): %p", emissiveTexture_);
 
-    // Always update all 5 descriptor bindings
-    vkUpdateDescriptorSets(device_, 5, descriptorWrites.data(), 0, nullptr);
-    LOG_INFO("Material", "Updated 5 descriptor bindings (all slots bound)");
+    // Bind UBO at binding 5
+    VkDescriptorBufferInfo bufferInfo = {};
+    bufferInfo.buffer = uboBuffer_->getBuffer();
+    bufferInfo.offset = 0;
+    bufferInfo.range = sizeof(MaterialUBO);
+
+    descriptorWrites[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrites[5].dstSet = descriptorSet_;
+    descriptorWrites[5].dstBinding = 5;
+    descriptorWrites[5].dstArrayElement = 0;
+    descriptorWrites[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    descriptorWrites[5].descriptorCount = 1;
+    descriptorWrites[5].pBufferInfo = &bufferInfo;
+    LOG_INFO("Material", "  Binding 5 (UBO): %p", uboBuffer_->getBuffer());
+
+    // Update all 6 descriptor bindings (5 textures + 1 UBO)
+    vkUpdateDescriptorSets(device_, 6, descriptorWrites.data(), 0, nullptr);
+    LOG_INFO("Material", "Updated 6 descriptor bindings (5 textures + 1 UBO)");
 
     return true;
 }
@@ -357,9 +392,19 @@ void Material::bind(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayo
 }
 
 void Material::fillUBOFromAsset(const assets::MaterialAsset& materialAsset) {
-    // Base color factor
-    std::memcpy(properties_.baseColorFactor, materialAsset.baseColorFactor,
-               sizeof(properties_.baseColorFactor));
+    // Base color factor - override to white (1.0) if texture is present
+    // Many GLTF materials use grey baseColorFactor which darkens textures
+    if (!materialAsset.baseColorTextureUuid.empty()) {
+        // If we have a texture, use white baseColorFactor to show full texture color
+        properties_.baseColorFactor[0] = 1.0f;
+        properties_.baseColorFactor[1] = 1.0f;
+        properties_.baseColorFactor[2] = 1.0f;
+        properties_.baseColorFactor[3] = materialAsset.baseColorFactor[3];  // Keep alpha
+    } else {
+        // No texture - use the material's baseColorFactor as the diffuse color
+        std::memcpy(properties_.baseColorFactor, materialAsset.baseColorFactor,
+                   sizeof(properties_.baseColorFactor));
+    }
 
     // Metallic/roughness
     properties_.metallicFactor = materialAsset.metallicFactor;

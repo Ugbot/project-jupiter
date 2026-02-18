@@ -68,8 +68,10 @@ layout(set = 1, binding = 5) uniform MaterialUBO {
 } material;
 
 // Push constants for runtime tuning
+// NOTE: Vertex shader uses bytes 0-63 for model matrix (mat4)
+// Fragment shader push constants start at offset 64
 layout(push_constant) uniform PushConstants {
-    float directLightIntensity;    // Scale all direct lights
+    layout(offset = 64) float directLightIntensity;    // Scale all direct lights
     float ambientIntensity;        // Scale ambient/IBL contribution
     float emissiveIntensity;       // Scale emissive contribution
     float roughnessOverride;       // Override roughness (when flag set)
@@ -77,6 +79,9 @@ layout(push_constant) uniform PushConstants {
     float baseReflectivity;        // F0 for dielectrics
     float exposure;                // Manual exposure multiplier
     float shadowIntensity;         // Shadow darkness
+    float maxReflectionLod;        // Max mip level for prefiltered IBL (from HelloVulkan)
+    float lightFalloff;            // Light attenuation power (from HelloVulkan)
+    float albedoMultiplier;        // Add albedo color to dark scenes (from HelloVulkan)
     uint flags;                    // Feature flags
 } pc;
 
@@ -90,8 +95,32 @@ const uint FLAG_DEBUG_ALBEDO = 1u << 5;
 const uint FLAG_DEBUG_METALLIC = 1u << 6;
 const uint FLAG_DEBUG_ROUGHNESS = 1u << 7;
 const uint FLAG_DEBUG_AO = 1u << 8;
+const uint FLAG_DEBUG_UV = 1u << 9;
+const uint FLAG_DEBUG_EMISSIVE = 1u << 10;
+const uint FLAG_DISABLE_DIRECT_LIGHT = 1u << 11;
+const uint FLAG_DISABLE_TONEMAPPING = 1u << 12;
+const uint FLAG_DEBUG_DIFFUSE_ONLY = 1u << 13;
+const uint FLAG_DEBUG_SPECULAR_ONLY = 1u << 14;
+const uint FLAG_DEBUG_F0 = 1u << 15;
 
 layout(location = 0) out vec4 outColor;
+
+// ============================================================================
+// sRGB to Linear conversion (from vulkan-gltf-pbr reference)
+// Textures are stored as UNORM, we convert manually for correctness
+// ============================================================================
+vec4 SRGBtoLINEAR(vec4 srgbIn) {
+    // Exact sRGB to linear conversion
+    vec3 bLess = step(vec3(0.04045), srgbIn.xyz);
+    vec3 linOut = mix(srgbIn.xyz / vec3(12.92), 
+                      pow((srgbIn.xyz + vec3(0.055)) / vec3(1.055), vec3(2.4)), 
+                      bLess);
+    return vec4(linOut, srgbIn.w);
+}
+
+vec3 SRGBtoLINEAR(vec3 srgbIn) {
+    return SRGBtoLINEAR(vec4(srgbIn, 1.0)).rgb;
+}
 
 // ============================================================================
 // Constants
@@ -99,7 +128,7 @@ layout(location = 0) out vec4 outColor;
 
 const float PI = 3.14159265359;
 const float MIN_ROUGHNESS = 0.04;
-const float MAX_REFLECTION_LOD = 4.0;
+const float DEFAULT_MAX_REFLECTION_LOD = 4.0;  // Fallback if push constant is 0
 
 // Shadow constants (from HelloVulkan)
 const float SHADOW_AMBIENT = 0.25;  // Shadows are not completely black (increased)
@@ -296,7 +325,9 @@ vec3 calculateAmbient(vec3 albedo, vec3 F0, vec3 N, vec3 V,
     // Sample IBL maps
     vec3 irradiance = texture(irradianceMap, N).rgb;
     vec3 R = reflect(-V, N);
-    vec3 prefilteredColor = textureLod(prefilteredMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+    // Use push constant maxReflectionLod for IBL sampling (from HelloVulkan)
+    float reflectionLod = pc.maxReflectionLod > 0.0 ? pc.maxReflectionLod : DEFAULT_MAX_REFLECTION_LOD;
+    vec3 prefilteredColor = textureLod(prefilteredMap, R, roughness * reflectionLod).rgb;
     vec2 brdf = texture(brdfLUT, vec2(NoV, roughness)).rg;
     
     // Check if IBL maps are valid (not just gray fallback)
@@ -347,9 +378,10 @@ vec3 calculateRadiance(vec3 albedo, vec3 N, vec3 V, vec3 F0,
         float distance = length(lightDir);
         L = lightDir / distance;
         
-        // Physically correct attenuation with minimum
-        float lightFalloff = 2.0;  // Square falloff
-        attenuation = 1.0 / pow(max(distance, 0.1), lightFalloff);
+        // Physically correct attenuation with configurable falloff (from HelloVulkan)
+        // pc.lightFalloff: lower = slower falloff, higher = faster falloff
+        float falloff = pc.lightFalloff > 0.0 ? pc.lightFalloff : 2.0;
+        attenuation = 1.0 / pow(max(distance, 0.1), falloff);
     }
     
     vec3 H = normalize(V + L);
@@ -389,13 +421,40 @@ void main() {
         return;
     }
     
-    // Sample textures with material factors
-    vec4 albedoSample = texture(albedoMap, fragTexCoord) * material.baseColorFactor;
-    vec3 albedo = pow(albedoSample.rgb, vec3(2.2));  // sRGB to linear
-    float alpha = albedoSample.a;
+    // Debug: show UVs
+    if ((pc.flags & FLAG_DEBUG_UV) != 0u) {
+        outColor = vec4(fragTexCoord, 0.0, 1.0);
+        return;
+    }
     
+    // Sample albedo texture and manually convert sRGB to linear (like HelloVulkan)
+    vec4 rawAlbedo = texture(albedoMap, fragTexCoord);
+    
+    // Alpha cutoff FIRST, before any processing (like HelloVulkan)
+    // Use raw texture alpha with simple 0.5 threshold
+    if (rawAlbedo.a < 0.5) {
+        discard;
+    }
+    
+    // Now process colors
+    vec3 albedo = pow(rawAlbedo.rgb, vec3(2.2)) * material.baseColorFactor.rgb;
+    float alpha = rawAlbedo.a;
+    
+    // Debug: show raw texture
     if ((pc.flags & FLAG_DEBUG_ALBEDO) != 0u) {
-        outColor = vec4(albedo, 1.0);
+        outColor = rawAlbedo;  // Show raw texture as stored
+        return;
+    }
+    
+    // Debug 9: show actual albedo used in lighting (after baseColorFactor)
+    if ((pc.flags & (1u << 16)) != 0u) {
+        outColor = vec4(albedo, 1.0);  // Show albedo * baseColorFactor
+        return;
+    }
+    
+    // Debug: show baseColorFactor itself (press key to add)
+    if ((pc.flags & (1u << 17)) != 0u) {
+        outColor = material.baseColorFactor;
         return;
     }
     
@@ -425,7 +484,14 @@ void main() {
     
     // Other material properties
     float ao = texture(occlusionMap, fragTexCoord).r;
+    // Emissive - convert sRGB to linear like albedo
     vec3 emissive = pow(texture(emissiveMap, fragTexCoord).rgb, vec3(2.2));
+    
+    // Debug: show emissive
+    if ((pc.flags & FLAG_DEBUG_EMISSIVE) != 0u) {
+        outColor = vec4(emissive, 1.0);
+        return;
+    }
     
     if ((pc.flags & FLAG_DEBUG_AO) != 0u) {
         outColor = vec4(vec3(ao), 1.0);
@@ -446,36 +512,88 @@ void main() {
     vec3 F0 = vec3(pc.baseReflectivity);
     F0 = mix(F0, albedo, metallic);
     
+    // Debug: show F0 (should be colored for metals, gray for dielectrics)
+    if ((pc.flags & FLAG_DEBUG_F0) != 0u) {
+        outColor = vec4(F0, 1.0);
+        return;
+    }
+    
     // Accumulate direct lighting
-    vec3 Lo = vec3(0.0);
+    // Add albedoMultiplier to brighten dark scenes (from HelloVulkan)
+    vec3 Lo = albedo * pc.albedoMultiplier;
+    vec3 diffuseAccum = vec3(0.0);  // For debug
+    vec3 specularAccum = vec3(0.0); // For debug
     bool shadowApplied = false;
     
-    for (int i = 0; i < lights.numLights && i < 16; i++) {
-        vec3 lightPos = lights.lightPositions[i].xyz;
-        float lightType = lights.lightPositions[i].w;
-        vec3 lightColor = lights.lightColors[i].xyz;
-        float lightIntensity = lights.lightColors[i].w;
-        
-        // Calculate radiance for this light
-        vec3 radiance = calculateRadiance(albedo, N, V, F0, metallic, roughness,
-                                          alphaRoughness, NoV, lightPos, lightColor,
-                                          lightIntensity, lightType);
-        
-        // Apply shadow only to first directional light
-        float shadow = 1.0;
-        if (lightType == 0.0 && !shadowApplied) {
-            vec3 L = normalize(lightPos);
-            float rawShadow = calculateShadowPoisson(fragWorldPos, N, L);
-            // Apply shadow intensity from push constants
-            shadow = mix(1.0, rawShadow, pc.shadowIntensity);
-            shadowApplied = true;
+    if ((pc.flags & FLAG_DISABLE_DIRECT_LIGHT) == 0u) {
+        for (int i = 0; i < lights.numLights && i < 16; i++) {
+            vec3 lightPos = lights.lightPositions[i].xyz;
+            float lightType = lights.lightPositions[i].w;
+            vec3 lightColor = lights.lightColors[i].xyz;
+            float lightIntensity = lights.lightColors[i].w;
+            
+            // Manually calculate for debug separation
+            vec3 L;
+            float attenuation = 1.0;
+            if (lightType == 0.0) {
+                L = normalize(lightPos);
+            } else {
+                vec3 lightDir = lightPos - fragWorldPos;
+                float distance = length(lightDir);
+                L = lightDir / distance;
+                float falloff = pc.lightFalloff > 0.0 ? pc.lightFalloff : 2.0;
+                attenuation = 1.0 / pow(max(distance, 0.1), falloff);
+            }
+            
+            vec3 H = normalize(V + L);
+            float NoH = max(dot(N, H), 0.0);
+            float NoL = max(dot(N, L), 0.0);
+            float HoV = max(dot(H, V), 0.0);
+            
+            vec3 radiance = lightColor * attenuation * lightIntensity;
+            
+            // Cook-Torrance BRDF components
+            float D = DistributionGGX(NoH, roughness);
+            float G = GeometrySchlickGGX(NoL, NoV, alphaRoughness);
+            vec3 F = FresnelSchlick(HoV, F0);
+            
+            vec3 specular = (D * G * F) / (4.0 * NoV * NoL + 0.0001);
+            
+            vec3 kS = F;
+            vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
+            vec3 diffuse = Diffuse(kD * albedo);
+            
+            // Apply shadow only to first directional light
+            float shadow = 1.0;
+            if (lightType == 0.0 && !shadowApplied) {
+                vec3 Ldir = normalize(lightPos);
+                float rawShadow = calculateShadowPoisson(fragWorldPos, N, Ldir);
+                shadow = mix(1.0, rawShadow, pc.shadowIntensity);
+                shadowApplied = true;
+            }
+            
+            diffuseAccum += diffuse * radiance * NoL * shadow;
+            specularAccum += specular * radiance * NoL * shadow;
+            Lo += (diffuse + specular) * radiance * NoL * shadow;
         }
-        
-        Lo += radiance * shadow;
     }
     
     // Apply direct light intensity from push constants
     Lo *= pc.directLightIntensity;
+    diffuseAccum *= pc.directLightIntensity;
+    specularAccum *= pc.directLightIntensity;
+    
+    // Debug: show diffuse contribution only
+    if ((pc.flags & FLAG_DEBUG_DIFFUSE_ONLY) != 0u) {
+        outColor = vec4(diffuseAccum, 1.0);
+        return;
+    }
+    
+    // Debug: show specular contribution only
+    if ((pc.flags & FLAG_DEBUG_SPECULAR_ONLY) != 0u) {
+        outColor = vec4(specularAccum, 1.0);
+        return;
+    }
     
     // IBL ambient (skip if disabled via push constants)
     vec3 ambient = vec3(0.0);
@@ -493,14 +611,16 @@ void main() {
     // Apply emissive intensity from push constants
     vec3 emissiveContrib = emissive * pc.emissiveIntensity;
     
-    // Final color with exposure from push constants
+    // Final color with exposure
     vec3 color = (ambient + Lo + emissiveContrib) * pc.exposure;
     
-    // Simple Reinhard tonemapping (preserves colors better than ACES for non-HDR pipeline)
-    color = color / (color + vec3(1.0));
+    // Tonemapping (can be toggled off for debugging)
+    if ((pc.flags & FLAG_DISABLE_TONEMAPPING) == 0u) {
+        color = color / (color + vec3(1.0));  // Reinhard
+    }
     
-    // Gamma correction (output to non-sRGB swapchain)
-    color = GammaCorrect(color);
+    // The swapchain uses VK_FORMAT_B8G8R8A8_SRGB, which automatically 
+    // converts linear color to sRGB gamma on output.
     
     outColor = vec4(color, alpha);
 }

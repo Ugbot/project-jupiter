@@ -143,7 +143,9 @@ private:
 class StreamingManager {
 public:
     /// Maximum pending load requests
-    static constexpr size_t MAX_LOAD_QUEUE = 512;
+    // NOTE: This must be large enough to hold all candidates for the chosen
+    // view distance; otherwise chunk generation will silently cap early.
+    static constexpr size_t MAX_LOAD_QUEUE = 8192;
 
     /// Maximum pending unload requests
     static constexpr size_t MAX_UNLOAD_QUEUE = 256;
@@ -190,28 +192,44 @@ public:
     bool update(const glm::vec3& cameraPos, IsLoadedFn&& isChunkLoaded) {
         const ChunkCoord cameraChunk = worldToChunk(cameraPos);
 
-        // Only regenerate requests if camera moved to new chunk
-        if (cameraChunk == lastCameraChunk_) {
+        bool cameraMovedChunk = (cameraChunk != lastCameraChunk_);
+
+        // Regenerate requests if:
+        // 1. Camera moved to new chunk, OR
+        // 2. Load queue is empty (need to check for more unloaded chunks)
+        bool needsRegeneration = cameraMovedChunk || loadRequests_.empty();
+
+        if (!needsRegeneration) {
             return false;
         }
+
         lastCameraChunk_ = cameraChunk;
 
         // Clear previous requests
         loadRequests_.clear();
         unloadRequests_.clear();
 
-        // Generate load requests for chunks in view
+        // Generate load requests for chunks in view.
+        //
+        // Important: for typical terrain worlds, the useful view distance is
+        // primarily horizontal (XZ). Generating a full 3D sphere (including Y)
+        // explodes candidate chunk counts and burns the request budget on
+        // vertical columns you rarely see.
+        //
+        // We treat viewDistance_ as the horizontal distance, and cap vertical
+        // generation to a small band around the camera chunk.
         const int viewDist = viewDistance_;
-        for (int dy = -viewDist; dy <= viewDist; ++dy) {
+        const int verticalDist = std::min(viewDist, 4);
+
+        for (int dy = -verticalDist; dy <= verticalDist; ++dy) {
             for (int dz = -viewDist; dz <= viewDist; ++dz) {
                 for (int dx = -viewDist; dx <= viewDist; ++dx) {
-                    // Skip corners (spherical view distance)
-                    const float dist = std::sqrt(
-                        static_cast<float>(dx*dx + dy*dy + dz*dz)
-                    );
-                    if (dist > viewDist) {
+                    const float horizontalDist = std::sqrt(static_cast<float>(dx * dx + dz * dz));
+                    if (horizontalDist > static_cast<float>(viewDist)) {
                         continue;
                     }
+
+                    const float dist3D = std::sqrt(static_cast<float>(dx * dx + dy * dy + dz * dz));
 
                     ChunkCoord coord{
                         cameraChunk.x + dx,
@@ -222,7 +240,7 @@ public:
                     if (!isChunkLoaded(coord)) {
                         ChunkLoadRequest req;
                         req.coord = coord;
-                        req.priority = dist;  // Closer = lower priority value
+                        req.priority = dist3D;  // Closer = lower priority value
                         loadRequests_.push_back(req);
                     }
                 }
@@ -240,7 +258,7 @@ public:
             loadRequests_.resize(MAX_LOAD_QUEUE);
         }
 
-        return true;
+        return cameraMovedChunk;  // Return whether camera actually moved (for unload checks)
     }
 
     /**

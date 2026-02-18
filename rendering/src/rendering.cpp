@@ -98,6 +98,10 @@ uint32_t Window::getHeight() const {
     return m_window ? static_cast<uint32_t>(m_window->getHeight()) : 0;
 }
 
+void* Window::getNativeHandle() const {
+    return m_window ? m_window->getNativeHandle() : nullptr;
+}
+
 VkResult Window::createVulkanSurface(VkInstance instance, VkSurfaceKHR* surface) const {
     if (!m_window || !surface) {
         return VK_ERROR_INITIALIZATION_FAILED;

@@ -1,55 +1,67 @@
 #version 450
 
-// Diffuse irradiance convolution
+// Diffuse irradiance convolution using MRT
 // Convolves environment cubemap over hemisphere for diffuse lighting
-// Renders one cubemap face at a time
+// Renders all 6 cubemap faces in a single pass
 
 layout(location = 0) in vec2 texCoord;
 
 // Input: Environment cubemap
 layout(set = 0, binding = 0) uniform samplerCube envCubemap;
 
-// Push constants to specify which face to render
+// Push constants for sample count
 layout(push_constant) uniform PushConstants {
-    int faceIndex; // 0-5 for +X, -X, +Y, -Y, +Z, -Z
+    float roughness;     // Unused for diffuse
+    uint sampleCount;    // Number of samples
 } pc;
 
-// Output: Single color attachment (one cubemap face)
-layout(location = 0) out vec4 outColor;
+// Multiple render targets - one per cubemap face
+layout(location = 0) out vec4 cubeFace0;
+layout(location = 1) out vec4 cubeFace1;
+layout(location = 2) out vec4 cubeFace2;
+layout(location = 3) out vec4 cubeFace3;
+layout(location = 4) out vec4 cubeFace4;
+layout(location = 5) out vec4 cubeFace5;
 
 // ============================================================================
-// Common IBL Functions (inlined)
+// Common IBL Functions
 // ============================================================================
 
 const float PI = 3.14159265359;
 
 // Convert cubemap face and local UV to 3D direction
-vec3 UVToDirection(int faceIndex, vec2 uv) {
-    // Convert UV from [0,1] to [-1,1]
-    vec2 texCoord = uv * 2.0 - 1.0;
-
-    vec3 dir;
-    if (faceIndex == 0) {
-        // +X
-        dir = vec3(1.0, -texCoord.y, -texCoord.x);
-    } else if (faceIndex == 1) {
-        // -X
-        dir = vec3(-1.0, -texCoord.y, texCoord.x);
-    } else if (faceIndex == 2) {
-        // +Y
-        dir = vec3(texCoord.x, 1.0, texCoord.y);
-    } else if (faceIndex == 3) {
-        // -Y
-        dir = vec3(texCoord.x, -1.0, -texCoord.y);
-    } else if (faceIndex == 4) {
-        // +Z
-        dir = vec3(texCoord.x, -texCoord.y, 1.0);
-    } else {
-        // -Z
-        dir = vec3(-texCoord.x, -texCoord.y, -1.0);
+vec3 UVToXYZ(int face, vec2 uv) {
+    if (face == 0) { 
+        return vec3(1.0, uv.y, -uv.x);  // +X
+    } else if (face == 1) { 
+        return vec3(-1.0, uv.y, uv.x);  // -X
+    } else if (face == 2) { 
+        return vec3(uv.x, -1.0, uv.y);  // +Y
+    } else if (face == 3) { 
+        return vec3(uv.x, 1.0, -uv.y);  // -Y
+    } else if (face == 4) { 
+        return vec3(uv.x, uv.y, 1.0);   // +Z
+    } else { 
+        return vec3(-uv.x, uv.y, -1.0); // -Z
     }
+}
 
-    return normalize(dir);
+void WriteFace(int face, vec3 colorIn) {
+    vec4 color = vec4(colorIn.rgb, 1.0);
+    
+    if (face == 0) {
+        cubeFace0 = color;
+    } else if (face == 1) {
+        cubeFace1 = color;
+    } else if (face == 2) {
+        cubeFace2 = color;
+    } else if (face == 3) {
+        cubeFace3 = color;
+    } else if (face == 4) {
+        cubeFace4 = color;
+    } else {
+        cubeFace5 = color;
+    }
 }
 
 // ============================================================================
@@ -87,11 +99,13 @@ vec3 ConvolveDiffuse(vec3 N) {
 }
 
 void main() {
-    // Convert UV to 3D direction for this cubemap face
-    vec3 normal = UVToDirection(pc.faceIndex, texCoord);
-
-    // Convolve diffuse irradiance
-    vec3 irradiance = ConvolveDiffuse(normal);
-
-    outColor = vec4(irradiance, 1.0);
+    vec2 texCoordTemp = texCoord * 2.0 - 1.0;
+    
+    for (int face = 0; face < 6; ++face) {
+        vec3 position = UVToXYZ(face, texCoordTemp);
+        vec3 normal = normalize(position);
+        
+        vec3 irradiance = ConvolveDiffuse(normal);
+        WriteFace(face, irradiance);
+    }
 }

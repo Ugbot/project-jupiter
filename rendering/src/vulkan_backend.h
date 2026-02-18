@@ -325,6 +325,11 @@ public:
     void destroy();
     void waitIdle();
 
+    // Swapchain management - handles window resize, minimize, etc.
+    void recreateSwapchain();
+    void setFramebufferResized(bool resized) { framebufferResized_ = resized; }
+    bool isMinimized() const;
+
     // Frame rendering
     bool beginFrame(uint32_t& imageIndex);
     void endFrame(uint32_t imageIndex);
@@ -356,15 +361,19 @@ public:
     // Getters
     VkDevice getDevice() const { return context_.getDevice(); }
     VkPhysicalDevice getPhysicalDevice() const { return context_.getPhysicalDevice(); }
+    VkInstance getInstance() const { return context_.getInstance(); }
     VmaAllocator getAllocator() const { return context_.getAllocator(); }
     VkCommandPool getCommandPool() const { return commandPool_; }
     VkQueue getGraphicsQueue() const { return context_.getGraphicsQueue(); }
+    uint32_t getGraphicsQueueFamily() const { return context_.getGraphicsFamily(); }
     VkExtent2D getExtent() const { return swapchain_.getExtent(); }
     VkPipelineCache getPipelineCache() const { return pipelineCache_; }
     VkRenderPass getRenderPass() const { return renderPass_; }
     VkImageView getDepthImageView() const { return depthImageView_; }
     uint32_t getCurrentFrameIndex() const { return currentFrame_; }
     uint32_t getFramesInFlight() const { return MAX_FRAMES_IN_FLIGHT; }
+    uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchain_.getImageCount()); }
+    VkFormat getSwapchainFormat() const { return swapchain_.getFormat(); }
     bool isValid() const { return context_.isValid(); }
     bool hasDescriptors() const { return pipeline_.hasDescriptors(); }
 
@@ -398,11 +407,15 @@ private:
     std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences_;
 
     uint32_t currentFrame_ = 0;
+    bool framebufferResized_ = false;
+    const Window* window_ = nullptr;  // For getting current window dimensions
 
     bool createRenderPass();
     bool createPipelineCache();
     void destroyPipelineCache();
     bool createFramebuffers();
+    void destroyFramebuffers();
+    void cleanupSwapchain();
     bool createCommandPool();
     bool createCommandBuffers();
     bool createSyncObjects();

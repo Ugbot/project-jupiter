@@ -1,0 +1,131 @@
+{
+  "blocks": [
+    {
+      "id": 0,
+      "name": "Air",
+      "identifier": "air",
+      "material": "gas",
+      "isSolid": false,
+      "isTransparent": true,
+      "density": -1.0
+    },
+    {
+      "id": 1,
+      "name": "Stone",
+      "identifier": "stone",
+      "material": "solid",
+      "texture": 1,
+      "hardness": 1.5,
+      "density": 1.0
+    },
+    {
+      "id": 2,
+      "name": "Dirt",
+      "identifier": "dirt",
+      "material": "solid",
+      "texture": 2,
+      "hardness": 0.5,
+      "density": 1.0
+    },
+    {
+      "id": 3,
+      "name": "Grass",
+      "identifier": "grass",
+      "material": "solid",
+      "textureTop": 3,
+      "textureSide": 4,
+      "textureBottom": 2,
+      "hardness": 0.6,
+      "density": 1.0
+    },
+    {
+      "id": 4,
+      "name": "Sand",
+      "identifier": "sand",
+      "material": "solid",
+      "texture": 5,
+      "hardness": 0.5,
+      "density": 1.0
+    },
+    {
+      "id": 5,
+      "name": "Water",
+      "identifier": "water",
+      "material": "liquid",
+      "isSolid": false,
+      "isTransparent": true,
+      "texture": 6,
+      "density": 0.0
+    },
+    {
+      "id": 6,
+      "name": "Wood",
+      "identifier": "wood",
+      "material": "solid",
+      "textureTop": 7,
+      "textureSide": 8,
+      "textureBottom": 7,
+      "hardness": 2.0,
+      "density": 1.0
+    },
+    {
+      "id": 7,
+      "name": "Leaves",
+      "identifier": "leaves",
+      "material": "vegetation",
+      "isTransparent": true,
+      "texture": 9,
+      "hardness": 0.2,
+      "density": 0.5
+    },
+    {
+      "id": 8,
+      "name": "Bedrock",
+      "identifier": "bedrock",
+      "material": "solid",
+      "texture": 10,
+      "hardness": -1.0,
+      "density": 1.0
+    },
+    {
+      "id": 9,
+      "name": "Cobblestone",
+      "identifier": "cobblestone",
+      "material": "solid",
+      "texture": 11,
+      "hardness": 2.0,
+      "density": 1.0
+    },
+    {
+      "id": 10,
+      "name": "Iron Ore",
+      "identifier": "iron_ore",
+      "material": "solid",
+      "texture": 12,
+      "hardness": 3.0,
+      "density": 1.0
+    },
+    {
+      "id": 11,
+      "name": "Coal Ore",
+      "identifier": "coal_ore",
+      "material": "solid",
+      "texture": 13,
+      "hardness": 3.0,
+      "density": 1.0
+    },
+    {
+      "id": 12,
+      "name": "Glass",
+      "identifier": "glass",
+      "material": "solid",
+      "isTransparent": true,
+      "texture": 14,
+      "hardness": 0.3,
+      "density": 0.8
+    }
+  ]
+}
+
+
+

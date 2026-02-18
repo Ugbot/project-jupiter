@@ -65,6 +65,46 @@ add_subdirectory(imguizmo)
 message(STATUS "  -> ImGuizmo configured successfully")
 
 # ============================================================================
+# Tracy Profiler (optional)
+# ============================================================================
+# Purpose: High-performance CPU/GPU profiler with remote viewer
+# License: 3-clause BSD
+# URL: https://github.com/wolfpld/tracy
+
+if(JUPITER_ENABLE_TRACY)
+    message(STATUS "  -> Configuring Tracy profiler...")
+
+    # Build Tracy as a static library and prefer on-demand capture to avoid
+    # overhead when the viewer is disconnected.
+    set(TRACY_ENABLE ON CACHE BOOL "Enable Tracy instrumentation" FORCE)
+    set(TRACY_ON_DEMAND ON CACHE BOOL "Enable on-demand profiling" FORCE)
+    set(TRACY_STATIC ON CACHE BOOL "Build Tracy as a static library" FORCE)
+    set(TRACY_ONLY_LOCALHOST ON CACHE BOOL "Restrict Tracy to localhost" FORCE)
+    set(TRACY_NO_BROADCAST ON CACHE BOOL "Disable broadcast discovery" FORCE)
+
+    add_subdirectory(tracy)
+
+    # Surface common properties for downstream targets
+    set(TRACY_PUBLIC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tracy/public" PARENT_SCOPE)
+    set(TRACY_CLIENT_TARGET Tracy::TracyClient PARENT_SCOPE)
+
+    message(STATUS "  -> Tracy profiler configured successfully")
+else()
+    message(STATUS "  -> Skipping Tracy profiler (JUPITER_ENABLE_TRACY=OFF)")
+endif()
+
+# ============================================================================
+# Meshoptimizer
+# ============================================================================
+# Purpose: Mesh optimization library (LOD, vertex cache, simplification)
+# License: MIT
+# URL: https://github.com/zeux/meshoptimizer
+
+message(STATUS "  -> Configuring meshoptimizer...")
+add_subdirectory(meshoptimizer)
+message(STATUS "  -> meshoptimizer configured successfully")
+
+# ============================================================================
 # Future vendored dependencies go here
 # ============================================================================
 

@@ -8,6 +8,11 @@ target_include_directories(core
         $<INSTALL_INTERFACE:include>
 )
 
+target_link_libraries(core
+    PUBLIC
+        profiling
+)
+
 # Set library properties
 set_target_properties(core PROPERTIES
     VERSION ${PROJECT_VERSION}

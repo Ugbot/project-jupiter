@@ -7,3 +7,12 @@ add_subdirectory(animation_demo)
 add_subdirectory(minimal-pbr)
 add_subdirectory(clustered_demo)
 add_subdirectory(primitives_demo)
+add_subdirectory(deferred_demo)
+add_subdirectory(voxel_demo)
+add_subdirectory(landscape_demo)
+
+# GHI/RAL demos
+add_subdirectory(ghi_test)
+add_subdirectory(dual_backend_demo)
+add_subdirectory(minimal_test)
+add_subdirectory(shapes_demo)

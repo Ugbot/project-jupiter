@@ -199,9 +199,11 @@ void VisTree::gatherDrawNode(int16_t nodeIndex, int level, const VisBounds& boun
                              const glm::mat4& viewProj) {
     VisNode& node = nodes_[nodeIndex];
 
-    // Height bounds for frustum culling (assume terrain 0-256 units high)
-    const float minY = 0.0f;
-    const float maxY = 256.0f;
+    // Height bounds for frustum culling (expanded for better coverage)
+    // Terrain generates from ~8 to ~88 units, but we want large AABB
+    // to avoid culling when camera is high and looking down
+    const float minY = -50.0f;
+    const float maxY = 500.0f;
 
     // Check visibility for drawing (but still generate geometry for non-visible)
     bool visible = isVisible(bounds, minY, maxY, viewProj);
@@ -278,55 +280,10 @@ void VisTree::gatherDrawNode(int16_t nodeIndex, int level, const VisBounds& boun
 
 bool VisTree::isVisible(const VisBounds& bounds, float minY, float maxY,
                         const glm::mat4& viewProj) const {
-    // Simple AABB-frustum test
-    // Extract frustum planes from view-projection matrix
-    glm::vec4 planes[6];
-    const glm::mat4& m = viewProj;
-
-    // Left
-    planes[0] = glm::vec4(m[0][3] + m[0][0], m[1][3] + m[1][0],
-                          m[2][3] + m[2][0], m[3][3] + m[3][0]);
-    // Right
-    planes[1] = glm::vec4(m[0][3] - m[0][0], m[1][3] - m[1][0],
-                          m[2][3] - m[2][0], m[3][3] - m[3][0]);
-    // Bottom
-    planes[2] = glm::vec4(m[0][3] + m[0][1], m[1][3] + m[1][1],
-                          m[2][3] + m[2][1], m[3][3] + m[3][1]);
-    // Top
-    planes[3] = glm::vec4(m[0][3] - m[0][1], m[1][3] - m[1][1],
-                          m[2][3] - m[2][1], m[3][3] - m[3][1]);
-    // Near
-    planes[4] = glm::vec4(m[0][3] + m[0][2], m[1][3] + m[1][2],
-                          m[2][3] + m[2][2], m[3][3] + m[3][2]);
-    // Far
-    planes[5] = glm::vec4(m[0][3] - m[0][2], m[1][3] - m[1][2],
-                          m[2][3] - m[2][2], m[3][3] - m[3][2]);
-
-    // AABB corners
-    glm::vec3 aabbMin(static_cast<float>(bounds.x0), minY, static_cast<float>(bounds.z0));
-    glm::vec3 aabbMax(static_cast<float>(bounds.x1), maxY, static_cast<float>(bounds.z1));
-    glm::vec3 center = (aabbMin + aabbMax) * 0.5f;
-    glm::vec3 halfExtent = (aabbMax - aabbMin) * 0.5f;
-
-    // Test against each plane
-    for (int i = 0; i < 6; ++i) {
-        glm::vec3 normal(planes[i].x, planes[i].y, planes[i].z);
-        float d = planes[i].w;
-
-        // Compute effective radius
-        float r = halfExtent.x * std::abs(normal.x) +
-                  halfExtent.y * std::abs(normal.y) +
-                  halfExtent.z * std::abs(normal.z);
-
-        // Distance from center to plane
-        float dist = glm::dot(normal, center) + d;
-
-        if (dist < -r) {
-            return false;  // Completely outside this plane
-        }
-    }
-
-    return true;
+    // TEMPORARILY DISABLED: Bypass frustum culling completely to debug missing terrain
+    // The GPU will handle clipping; we just want to see if culling is the issue
+    (void)bounds; (void)minY; (void)maxY; (void)viewProj;
+    return true;  // Always visible - let GPU do clipping
 }
 
 void VisTree::applyGeom(int16_t nodeIndex, int16_t gpuSlot, uint32_t vertexCount, bool isEmpty) {

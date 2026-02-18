@@ -162,6 +162,9 @@ private:
         /// Pre-allocated voxel data buffer (VOXEL_DATA_SIZE bytes)
         std::unique_ptr<uint8_t[]> voxelData;
 
+        /// Pre-allocated lighting data buffer for AO (VOXEL_DATA_SIZE bytes)
+        std::unique_ptr<uint8_t[]> lightingData;
+
         /// Pre-allocated mesh output buffer
         std::unique_ptr<MeshBuffer> meshBuffer;
 
@@ -192,11 +195,12 @@ private:
     /**
      * @brief Generate LOD terrain data for a bounds
      *
-     * @param voxelData Output voxel buffer
+     * @param voxelData Output voxel buffer (blocks)
+     * @param lightingData Output lighting buffer (for AO computation)
      * @param bounds World bounds to generate
      * @param level LOD level
      */
-    void generateLODTerrain(uint8_t* voxelData, const VisBounds& bounds, int level);
+    void generateLODTerrain(uint8_t* voxelData, uint8_t* lightingData, const VisBounds& bounds, int level);
 
     // =========================================================================
     // Ring Buffer (SPMC - Single Producer Multiple Consumer)

@@ -76,12 +76,18 @@ vec2 GetPoissonDiskCoord(vec2 projCoords, int i, float radius) {
 vec2 GetRotatedPoissonSample(int index, float rotation) {
     float s = sin(rotation);
     float c = cos(rotation);
-    vec2 sample = poissonDisk[index % POISSON_COUNT];
+    vec2 poissonSample = poissonDisk[index % POISSON_COUNT];
     return vec2(
-        sample.x * c - sample.y * s,
-        sample.x * s + sample.y * c
+        poissonSample.x * c - poissonSample.y * s,
+        poissonSample.x * s + poissonSample.y * c
     );
 }
 
 #endif // POISSON_GLSL
+
+
+
+
+
+
 

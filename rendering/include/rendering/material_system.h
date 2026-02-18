@@ -3,6 +3,7 @@
 #include "material.h"
 #include "assets/material_asset.h"
 #include <vulkan/vulkan.h>
+#include <vk_mem_alloc.h>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -61,10 +62,11 @@ public:
      * Pre-allocates pool with capacity for maxMaterials.
      *
      * @param device Vulkan device
+     * @param allocator VMA allocator for UBO creation
      * @param maxMaterials Maximum number of materials (pre-allocates pool)
      * @return true if successful
      */
-    bool initialize(VkDevice device, uint32_t maxMaterials = 100);
+    bool initialize(VkDevice device, VmaAllocator allocator, uint32_t maxMaterials = 100);
 
     /**
      * @brief Cleanup all material resources
@@ -147,6 +149,7 @@ public:
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
 

@@ -373,4 +373,13 @@ Based on HelloVulkan benchmarks:
 - **Compute Skinning**: GPU-only animation updates
 - **Bindless Rendering**: Zero texture binding overhead
 
+## Runtime Render Settings (Jupiter)
+- `Application::getRenderSettingsMutable()` exposes toggles for IBL, shadows, SSAO, exposure, light falloff, albedo boost, and optional reflection LOD clamp. Changes take effect next frame without pipeline rebuilds.
+- `setIBLEnabled` / `setShadowsEnabled` / `setSSAOEnabled` provide convenience helpers for game settings menus.
+- PBR push constants now derive from these settings so the shader respects runtime changes (e.g., disabling IBL sets `FLAG_DISABLE_IBL`).
+
+## Tracy Profiling Quickstart
+- Tracy is enabled via `JUPITER_ENABLE_TRACY` (default ON) and instrumented in the render loop and IBL generation (`profiling/profiler.h` macros).
+- Capture GPU/CPU timings by running the Tracy UI and connecting to the running app; zones are labeled with the function names (e.g., `PipelineIBL::filterSpecularPrefiltered`, `Application::renderPBRScene`).
+
 This integration plan transforms Project Jupiter from a basic Vulkan wrapper into a high-performance rendering engine capable of competing with commercial game engines.

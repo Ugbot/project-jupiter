@@ -6,8 +6,10 @@
 #include "rendering/resources_shadow.h"
 #include "logging/logging.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/ext/matrix_clip_space.hpp>  // For glm::orthoRH_ZO (Vulkan Z range)
 #include <cstring>
 #include <stdexcept>
+#include <cmath>
 
 namespace jupiter::rendering {
 
@@ -306,18 +308,32 @@ void ResourcesShadow::updateShadowUBO(uint32_t frameIndex,
                                        const glm::vec3& lightPos,
                                        const glm::vec3& lightDir,
                                        const glm::vec3& targetPos) {
-    // Calculate light-space matrix
-    glm::mat4 lightView = glm::lookAt(lightPos, targetPos, glm::vec3(0.0f, 1.0f, 0.0f));
-    
+    // Calculate light-space matrix for directional light
+    // For a directional light, the view direction should be FIXED (lightDir),
+    // not rotating to track the camera. We position the light above the scene
+    // and look in the fixed light direction.
+    glm::vec3 lookTarget = lightPos + glm::normalize(lightDir);
+
+    // Choose an up vector that's not parallel to the light direction
+    // If light is mostly vertical, use X as up instead of Y
+    glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+    if (std::abs(glm::dot(glm::normalize(lightDir), up)) > 0.99f) {
+        up = glm::vec3(1.0f, 0.0f, 0.0f);
+    }
+
+    glm::mat4 lightView = glm::lookAt(lightPos, lookTarget, up);
+
     // Use orthographic projection for directional lights
+    // glm::orthoRH_ZO = Right-Handed, Zero-to-One depth range
+    // RH matches lookAt's view space (negative Z for objects in front)
     float orthoSize = config_.orthoSize;
-    glm::mat4 lightProjection = glm::ortho(
+    glm::mat4 lightProjection = glm::orthoRH_ZO(
         -orthoSize, orthoSize,
         -orthoSize, orthoSize,
         config_.nearPlane, config_.farPlane
     );
-    
-    // Vulkan clip space adjustment (Y flip)
+
+    // Vulkan Y flip (Y points down in NDC)
     lightProjection[1][1] *= -1.0f;
 
     shadowUBO_.lightSpaceMatrix = lightProjection * lightView;

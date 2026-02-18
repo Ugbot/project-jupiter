@@ -1,62 +1,70 @@
 #version 450
 
-// Equirectangular to cubemap conversion
-// Renders one cubemap face at a time
+// Equirectangular to cubemap conversion using MRT
+// Renders all 6 cubemap faces in a single pass
+
+#ifndef PI
+#define PI 3.1415926535897932384626433832795
+#endif
 
 layout(location = 0) in vec2 texCoord;
+
+// Multiple render targets - one per cubemap face
+layout(location = 0) out vec4 cubeFace0;
+layout(location = 1) out vec4 cubeFace1;
+layout(location = 2) out vec4 cubeFace2;
+layout(location = 3) out vec4 cubeFace3;
+layout(location = 4) out vec4 cubeFace4;
+layout(location = 5) out vec4 cubeFace5;
 
 // Input: Equirectangular HDR image
 layout(set = 0, binding = 0) uniform sampler2D equirectMap;
 
-// Push constants to specify which face to render
-layout(push_constant) uniform PushConstants {
-    int faceIndex; // 0-5 for +X, -X, +Y, -Y, +Z, -Z
-} pc;
-
-// Output: Single color attachment (one cubemap face)
-layout(location = 0) out vec4 outColor;
-
 // ============================================================================
-// Common IBL Functions (inlined)
+// Cubemap Direction Functions
 // ============================================================================
 
-const float PI = 3.14159265359;
-
-// Convert direction vector to UV coordinates for equirectangular mapping
-vec2 DirToEquirectUV(vec3 dir) {
-    vec2 uv = vec2(atan(dir.z, dir.x), asin(dir.y));
-    uv *= vec2(0.1591, 0.3183); // inverse atan
-    uv += 0.5;
-    return uv;
+// https://en.wikipedia.org/wiki/Cube_mapping#Memory_addressing
+vec3 UVToXYZ(int face, vec2 uv) {
+    if (face == 0) { 
+        return vec3(1.0, uv.y, -uv.x);  // +X
+    } else if (face == 1) { 
+        return vec3(-1.0, uv.y, uv.x);  // -X
+    } else if (face == 2) { 
+        return vec3(uv.x, -1.0, uv.y);  // +Y
+    } else if (face == 3) { 
+        return vec3(uv.x, 1.0, -uv.y);  // -Y
+    } else if (face == 4) { 
+        return vec3(uv.x, uv.y, 1.0);   // +Z
+    } else { 
+        return vec3(-uv.x, uv.y, -1.0); // -Z
+    }
 }
 
-// Convert cubemap face and local UV to 3D direction
-vec3 UVToDirection(int faceIndex, vec2 uv) {
-    // Convert UV from [0,1] to [-1,1]
-    vec2 texCoord = uv * 2.0 - 1.0;
+// Convert Cartesian direction vector to spherical coordinates
+vec2 DirToUV(vec3 dir) {
+    return vec2(
+        0.5 + 0.5 * atan(dir.z, dir.x) / PI,  // phi
+        1.0 - acos(dir.y) / PI                 // theta
+    );
+}
 
-    vec3 dir;
-    if (faceIndex == 0) {
-        // +X
-        dir = vec3(1.0, -texCoord.y, -texCoord.x);
-    } else if (faceIndex == 1) {
-        // -X
-        dir = vec3(-1.0, -texCoord.y, texCoord.x);
-    } else if (faceIndex == 2) {
-        // +Y
-        dir = vec3(texCoord.x, 1.0, texCoord.y);
-    } else if (faceIndex == 3) {
-        // -Y
-        dir = vec3(texCoord.x, -1.0, -texCoord.y);
-    } else if (faceIndex == 4) {
-        // +Z
-        dir = vec3(texCoord.x, -texCoord.y, 1.0);
+void WriteFace(int face, vec3 colorIn) {
+    vec4 color = vec4(colorIn.rgb, 1.0);
+    
+    if (face == 0) {
+        cubeFace0 = color;
+    } else if (face == 1) {
+        cubeFace1 = color;
+    } else if (face == 2) {
+        cubeFace2 = color;
+    } else if (face == 3) {
+        cubeFace3 = color;
+    } else if (face == 4) {
+        cubeFace4 = color;
     } else {
-        // -Z
-        dir = vec3(-texCoord.x, -texCoord.y, -1.0);
+        cubeFace5 = color;
     }
-
-    return normalize(dir);
 }
 
 // ============================================================================
@@ -64,14 +72,13 @@ vec3 UVToDirection(int faceIndex, vec2 uv) {
 // ============================================================================
 
 void main() {
-    // Convert UV to 3D direction for this cubemap face
-    vec3 direction = UVToDirection(pc.faceIndex, texCoord);
-
-    // Convert direction to equirectangular UV
-    vec2 equirectUV = DirToEquirectUV(direction);
-
-    // Sample from equirectangular map
-    vec3 color = texture(equirectMap, equirectUV).rgb;
-
-    outColor = vec4(color, 1.0);
+    vec2 texCoordTemp = texCoord * 2.0 - 1.0;
+    
+    for (int face = 0; face < 6; ++face) {
+        vec3 position = UVToXYZ(face, texCoordTemp);
+        vec3 direction = normalize(position);
+        direction.y = -direction.y;  // Flip Y for correct orientation
+        vec2 finalTexCoord = DirToUV(direction);
+        WriteFace(face, texture(equirectMap, finalTexCoord).rgb);
+    }
 }

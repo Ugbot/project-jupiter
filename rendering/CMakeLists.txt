@@ -6,6 +6,7 @@ add_library(rendering
     src/lighting.cpp
     src/texture.cpp
     src/ibl_resources.cpp
+    src/pipeline_ibl.cpp
     src/vulkan_compute_pipeline.cpp
     # src/gltf_model.cpp  # Deprecated - use assets/gltf_loader.h instead
     src/vulkan_mesh.cpp
@@ -15,6 +16,19 @@ add_library(rendering
     src/render_globals.cpp
     src/default_textures.cpp
     src/primitives.cpp
+    # GHI/RAL Multi-Backend System
+    src/ghi/ghi_core.cpp
+    src/ghi/util/ghi_shader_cross.cpp
+    src/ghi/backends/ghi_vulkan.cpp  # Wrapper backend (for existing Application)
+    # OpenGL 4.3+ fallback - disabled on macOS (limited to OpenGL 4.1 and deprecated)
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:src/ghi/backends/ghi_opengl.cpp>
+    #src/ghi/backends/ghi_vulkan_standalone.cpp  # Standalone backend (for new demos) - WIP
+    src/ral/ral.cpp
+    src/ral/trail_field.cpp
+    src/ral/grass_system.cpp
+    src/ral/ibl_processor.cpp
+    src/pipelines/pipeline_simple.cpp
+    src/pipelines/pipeline_pbr.cpp
     # Clustered forward rendering
     src/resources_clustered.cpp
     src/pipeline_base.cpp
@@ -27,6 +41,7 @@ add_library(rendering
     src/resources_hdr.cpp
     src/pipeline_shadow.cpp
     src/pipeline_gbuffer.cpp
+    src/pipeline_deferred.cpp
     src/pipeline_ssao.cpp
     src/pipeline_tonemap.cpp
     src/pipeline_skybox.cpp
@@ -42,6 +57,10 @@ add_library(rendering
     # UI System (Phase 3)
     src/pipeline_imgui.cpp
     src/pipeline_debug.cpp
+    # Voxel rendering pipeline
+    src/pipeline_voxel.cpp
+    src/pipeline_smooth_terrain.cpp
+    src/chunk_mesh_pool.cpp
 )
 
 target_include_directories(rendering
@@ -70,10 +89,46 @@ target_link_libraries(rendering
         assets      # Asset loading and management (CPU-only)
         math
         logging
+        profiling   # Tracy profiling integration
         jupiter_ecs # ECS with Arrow-style kernels
         imgui       # Dear ImGui with SDL3+Vulkan backend
         imguizmo    # ImGuizmo for transform gizmos
 )
+
+# SPIRV-Cross for shader cross-compilation
+if(EXISTS ${CMAKE_SOURCE_DIR}/vendored/spirv-cross/CMakeLists.txt)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/vendored/spirv-cross spirv-cross EXCLUDE_FROM_ALL)
+    target_link_libraries(rendering PRIVATE
+        spirv-cross-core
+        spirv-cross-glsl
+        spirv-cross-msl
+        spirv-cross-hlsl
+    )
+    target_include_directories(rendering PRIVATE
+        ${CMAKE_SOURCE_DIR}/vendored/spirv-cross
+    )
+endif()
+
+# metal-cpp for native Metal backend (macOS only)
+if(APPLE)
+    target_sources(rendering PRIVATE
+        src/ghi/backends/ghi_metal_complete.cpp
+    )
+    
+    target_include_directories(rendering PRIVATE
+        ${CMAKE_SOURCE_DIR}/vendored/metal-cpp
+    )
+    
+    target_link_libraries(rendering PRIVATE
+        "-framework Metal"
+        "-framework QuartzCore"
+        "-framework Foundation"
+    )
+    
+    target_compile_definitions(rendering PRIVATE
+        GHI_METAL_AVAILABLE
+    )
+endif()
 
 # Find Vulkan SDK (with MoltenVK support for macOS)
 find_package(Vulkan QUIET)
@@ -172,3 +227,18 @@ add_subdirectory(shaders/exposure)
 
 # Add GPU-driven compute shaders (frustum culling, etc.)
 add_subdirectory(shaders/compute)
+
+# Add foliage shaders compilation (grass, vegetation)
+add_subdirectory(shaders/foliage)
+
+# Add voxel shaders compilation
+add_subdirectory(shaders/voxel)
+
+# Add uber shaders compilation (single-source for all backends)
+add_subdirectory(shaders/uber)
+
+# Add PBR shaders compilation (Cook-Torrance forward PBR)
+add_subdirectory(shaders/pbr)
+
+# Add ImGui overlay shaders compilation
+add_subdirectory(shaders/imgui)

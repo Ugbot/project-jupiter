@@ -100,11 +100,15 @@ layout(push_constant) uniform PushConstants {
     float zNear;
     float zFar;
     
-    // Rendering parameters (16 bytes)
+    // Rendering parameters (32 bytes)
     float exposure;
     float ambientIntensity;
     float directLightIntensity;
+    float maxReflectionLod;      // Max mip level for prefiltered IBL
+    float lightFalloff;          // Light attenuation power
+    float albedoMultiplier;      // Add albedo color to dark scenes
     uint flags;
+    uint _padding;
 } pc;
 
 // Flag bits for debug/feature toggles
@@ -155,9 +159,16 @@ vec3 getNormalFromMap() {
 // ============================================================================
 
 void main() {
-    // Sample textures
-    vec4 albedoSample = texture(albedoMap, inTexCoord) * material.baseColorFactor;
-    vec3 albedo = GammaToLinear(albedoSample.rgb);
+    // Sample textures - convert sRGB to linear, then apply linear-space factors
+    vec4 rawAlbedo = texture(albedoMap, inTexCoord);
+    vec3 albedo = GammaToLinear(rawAlbedo.rgb) * material.baseColorFactor.rgb;
+    float alpha = rawAlbedo.a * material.baseColorFactor.a;
+    
+    // Alpha cutoff for masked materials
+    if (alpha < 0.5) {
+        discard;
+    }
+    
     vec3 normal = getNormalFromMap();
     vec2 metallicRoughness = texture(metallicRoughnessMap, inTexCoord).bg;
     float metallic = metallicRoughness.x * material.metallicFactor;
@@ -202,6 +213,35 @@ void main() {
     // Accumulate lighting
     vec3 Lo = vec3(0.0);
     float alphaRoughness = AlphaDirectLighting(roughness);
+    float NoV = max(dot(N, V), 0.0);
+
+    // Add directional light (sun) - hardcoded for now
+    {
+        vec3 sunDir = normalize(vec3(-0.5, -1.0, -0.5));  // Sun coming from above-front-right
+        vec3 sunColor = vec3(1.0, 0.98, 0.95);  // Warm white
+        float sunIntensity = 5.0;  // Strong sun
+        
+        vec3 L = -sunDir;
+        vec3 H = normalize(V + L);
+        float NoH = max(dot(N, H), 0.0);
+        float NoL = max(dot(N, L), 0.0);
+        float HoV = max(dot(H, V), 0.0);
+        
+        // Cook-Torrance BRDF
+        float D = DistributionGGX(NoH, roughness);
+        float G = GeometrySchlickGGX(NoL, NoV, alphaRoughness);
+        vec3 F = FresnelSchlick(HoV, F0);
+        
+        vec3 numerator = D * G * F;
+        float denominator = 4.0 * NoV * NoL + 0.0001;
+        vec3 specular = numerator / denominator;
+        
+        vec3 kS = F;
+        vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
+        
+        vec3 sunRadiance = sunColor * sunIntensity;
+        Lo += (Diffuse(kD * albedo) + specular) * sunRadiance * NoL;
+    }
 
     // Process all lights in this cluster
     for (uint i = 0; i < cell.count; ++i) {
@@ -263,8 +303,8 @@ void main() {
         color = TonemapReinhard(color);
     }
     
-    // Gamma correction
-    color = LinearToSRGB(color);
+    // NOTE: No manual gamma correction - swapchain is VK_FORMAT_B8G8R8A8_SRGB
+    // which automatically converts linear to sRGB on output
 
-    outColor = vec4(color, albedoSample.a);
+    outColor = vec4(color, alpha);
 }

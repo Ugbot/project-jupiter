@@ -112,10 +112,10 @@ void VoxelMesher::beginChunk(const ChunkVoxelData* chunk,
     stbvox_set_buffer(maker, 0, 0, currentBuffer_, currentBufferSize_);
 
     // Calculate strides for the padded array
-    // Memory layout: Z varies fastest (stride 1), then Y (stride 18), then X (stride 324)
+    // Memory layout: Z varies fastest (stride 1), then Y (stride PADDED_SIZE), then X (stride PADDED_HEIGHT*PADDED_SIZE)
     // stb_voxel_render REQUIRES Z to be consecutive (stride 1)
-    const int strideX = PADDED_SIZE * PADDED_SIZE;  // 18 * 18 = 324
-    const int strideY = PADDED_SIZE;                 // 18
+    const int strideX = PADDED_HEIGHT * PADDED_SIZE;  // 130 * 18 = 2340
+    const int strideY = PADDED_SIZE;                   // 18
     stbvox_set_input_stride(maker, strideX, strideY);
 
     // Set input range (skip the border voxels for actual mesh generation)
@@ -123,7 +123,7 @@ void VoxelMesher::beginChunk(const ChunkVoxelData* chunk,
     stbvox_set_input_range(maker,
         CHUNK_BORDER, CHUNK_BORDER, CHUNK_BORDER,  // Start (skip border)
         CHUNK_BORDER + CHUNK_SIZE,                  // End X
-        CHUNK_BORDER + CHUNK_SIZE,                  // End Y
+        CHUNK_BORDER + CHUNK_HEIGHT,                // End Y (tall chunks)
         CHUNK_BORDER + CHUNK_SIZE);                 // End Z
 
     // Set up input description
@@ -133,6 +133,12 @@ void VoxelMesher::beginChunk(const ChunkVoxelData* chunk,
     // Cast away const - stb API is non-const but doesn't modify the data
     desc->blocktype = const_cast<uint8_t*>(chunk->blocks);
     desc->color = const_cast<uint8_t*>(chunk->blocks);  // Use block type as color palette index
+
+    // Set lighting input for ambient occlusion
+    // stb_voxel_render averages lighting values at vertices from adjacent blocks.
+    // Solid blocks = 63 (max), air blocks = 0 creates Minecraft-style AO.
+    // We use the chunk's lighting array which mirrors the block data.
+    desc->lighting = const_cast<uint8_t*>(chunk->lighting);
 }
 
 MeshResult VoxelMesher::meshify() {
@@ -320,17 +326,18 @@ void generateProceduralTerrain(ChunkVoxelData* chunk,
     const int worldY = coord.y * CHUNK_SIZE;
     const int worldZ = coord.z * CHUNK_SIZE;
 
-    for (int lz = 0; lz < CHUNK_SIZE; ++lz) {
-        for (int ly = 0; ly < CHUNK_SIZE; ++ly) {
+    // Y is UP in our coordinate system
+    for (int ly = 0; ly < CHUNK_SIZE; ++ly) {
+        for (int lz = 0; lz < CHUNK_SIZE; ++lz) {
             for (int lx = 0; lx < CHUNK_SIZE; ++lx) {
                 int wx = worldX + lx;
-                int wy = worldY + ly;
+                int wy = worldY + ly;  // Y is vertical (height)
                 int wz = worldZ + lz;
 
-                // Generate height using 2D noise
+                // Generate height using 2D noise on XZ plane
                 float n = noise3D(
                     static_cast<float>(wx) * scale,
-                    static_cast<float>(wy) * scale,
+                    static_cast<float>(wz) * scale,  // Use Z for horizontal noise
                     0.0f,
                     seed
                 );
@@ -338,19 +345,28 @@ void generateProceduralTerrain(ChunkVoxelData* chunk,
                 int height = static_cast<int>(baseHeight + n * amplitude);
 
                 BlockType block = BLOCK_AIR;
+                uint8_t lighting = 63;  // Air = fully lit (for AO)
 
-                if (wz < height - 3) {
+                // Y is the vertical axis
+                if (wy < height - 3) {
                     block = BLOCK_STONE;
-                } else if (wz < height - 1) {
+                    lighting = 0;  // Solid = occluded (for AO averaging)
+                } else if (wy < height - 1) {
                     block = BLOCK_DIRT;
-                } else if (wz < height) {
+                    lighting = 0;
+                } else if (wy < height) {
                     block = BLOCK_GRASS;
+                    lighting = 0;
                 }
 
-                chunk->setBlock(lx, ly, lz, block);
+                // Set block and lighting at same index
+                int idx = ChunkVoxelData::getIndex(lx, ly, lz);
+                chunk->blocks[idx] = block;
+                chunk->lighting[idx] = lighting;
             }
         }
     }
+    chunk->editGeneration++;
 }
 
 void generateFlatTerrain(ChunkVoxelData* chunk,

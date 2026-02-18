@@ -68,8 +68,9 @@ bool VoxelJobSystem::initialize(uint32_t numWorkers, uint32_t worldSeed) {
         ctx.mesher = std::make_unique<VoxelMesher>();
         ctx.mesher->initialize();
 
-        // Create per-worker voxel data buffer
+        // Create per-worker voxel data buffers (blocks and lighting)
         ctx.voxelData = std::make_unique<uint8_t[]>(VOXEL_DATA_SIZE);
+        ctx.lightingData = std::make_unique<uint8_t[]>(VOXEL_DATA_SIZE);
 
         // Create per-worker mesh output buffer
         ctx.meshBuffer = std::make_unique<MeshBuffer>();
@@ -220,16 +221,17 @@ void VoxelJobSystem::workerLoop(uint32_t threadId) {
 }
 
 void VoxelJobSystem::processJob(WorkerContext& ctx, const GeomGenJob& job, int16_t gpuSlot) {
-    // Generate terrain for this LOD region
-    generateLODTerrain(ctx.voxelData.get(), job.bounds, job.level);
+    // Generate terrain for this LOD region (blocks and lighting)
+    generateLODTerrain(ctx.voxelData.get(), ctx.lightingData.get(), job.bounds, job.level);
 
     // Mesh the voxel data
     ctx.mesher->setBuffer(ctx.meshBuffer.get());
 
-    // Create temp chunk data from our voxel buffer
+    // Create temp chunk data from our voxel buffers
     ChunkVoxelData tempChunk;
-    std::memcpy(tempChunk.blocks, ctx.voxelData.get(),
-                PADDED_SIZE * PADDED_HEIGHT * PADDED_SIZE);
+    const size_t dataSize = PADDED_SIZE * PADDED_HEIGHT * PADDED_SIZE;
+    std::memcpy(tempChunk.blocks, ctx.voxelData.get(), dataSize);
+    std::memcpy(tempChunk.lighting, ctx.lightingData.get(), dataSize);
 
     ChunkCoord dummyCoord{0, 0, 0};
     const ChunkVoxelData* neighbors[6] = {nullptr};
@@ -260,14 +262,17 @@ void VoxelJobSystem::processJob(WorkerContext& ctx, const GeomGenJob& job, int16
 }
 
 // ============================================================================
-// Terrain Generation
+// Terrain Generation - Varied landscape with mountains, valleys, and hills
 // ============================================================================
 
 void VoxelJobSystem::generateLODTerrain(uint8_t* voxelData,
+                                         uint8_t* lightingData,
                                          const VisBounds& bounds,
                                          int level) {
-    // Clear voxel data
-    std::memset(voxelData, 0, PADDED_SIZE * PADDED_HEIGHT * PADDED_SIZE);
+    // Clear voxel data and lighting
+    const size_t dataSize = PADDED_SIZE * PADDED_HEIGHT * PADDED_SIZE;
+    std::memset(voxelData, 0, dataSize);
+    std::memset(lightingData, 0, dataSize);  // Air = 0 lighting (for AO)
 
     // Calculate world-to-voxel scale
     const float boundsWidth = static_cast<float>(bounds.x1 - bounds.x0);
@@ -275,59 +280,165 @@ void VoxelJobSystem::generateLODTerrain(uint8_t* voxelData,
     const float voxelSizeX = boundsWidth / CHUNK_SIZE;
     const float voxelSizeZ = boundsDepth / CHUNK_SIZE;
 
-    const float noiseScale = 0.003f;  // Larger features for LOD
-    const float amplitude = 80.0f;    // Tall hills
-    const float baseHeight = 8.0f;    // Base height
+    // Sea level and height parameters
+    const float seaLevel = 30.0f;         // Base sea level
+    const float valleyFloor = 5.0f;       // Deep valleys can go this low
+    const float mountainPeak = 150.0f;    // Mountains can reach this high
+    const float hillHeight = 60.0f;       // Rolling hills mid-range
 
-    // Generate terrain using multi-octave simplex noise
+    // Generate terrain using multi-octave simplex noise with biome blending
     for (int lx = 0; lx < PADDED_SIZE; ++lx) {
         for (int lz = 0; lz < PADDED_SIZE; ++lz) {
             // World coordinates
             float wx = bounds.x0 + (lx - CHUNK_BORDER) * voxelSizeX;
             float wz = bounds.z0 + (lz - CHUNK_BORDER) * voxelSizeZ;
 
-            // Multi-octave simplex noise with variation
-            glm::vec2 p(wx * noiseScale, wz * noiseScale);
+            // Domain warping - distort coordinates for more organic shapes
+            const float warpScale = 0.0008f;
+            const float warpStrength = 150.0f;
+            glm::vec2 warpPos(wx * warpScale, wz * warpScale);
+            float warpX = glm::simplex(warpPos + glm::vec2(100.0f, 0.0f)) * warpStrength;
+            float warpZ = glm::simplex(warpPos + glm::vec2(0.0f, 100.0f)) * warpStrength;
 
-            // Large rolling hills
-            float n = glm::simplex(p * 0.3f) * 1.0f;
-            // Medium features
-            n += glm::simplex(p * 0.7f) * 0.6f;
-            // Small hills
-            n += glm::simplex(p * 1.5f) * 0.35f;
-            // Fine detail
-            n += glm::simplex(p * 3.0f) * 0.2f;
-            // Very fine detail
-            n += glm::simplex(p * 6.0f) * 0.1f;
+            float warpedX = wx + warpX;
+            float warpedZ = wz + warpZ;
 
-            // Ridge noise for more dramatic terrain
-            float ridge = 1.0f - std::abs(glm::simplex(p * 0.5f + glm::vec2(100.0f)));
-            ridge = ridge * ridge;  // Sharpen ridges
-            n += ridge * 0.4f;
+            // ================================================================
+            // Biome selector - determines mountain vs plains vs valley regions
+            // ================================================================
+            const float biomeScale = 0.0004f;
+            glm::vec2 biomePos(warpedX * biomeScale, warpedZ * biomeScale);
+            float biomeNoise = glm::simplex(biomePos) * 0.6f
+                             + glm::simplex(biomePos * 2.3f) * 0.3f
+                             + glm::simplex(biomePos * 4.7f) * 0.1f;
 
-            // Normalize to roughly 0-1
-            n = n * 0.35f + 0.5f;
-            n = std::clamp(n, 0.0f, 1.0f);
+            // Remap to 0-1 range
+            biomeNoise = biomeNoise * 0.5f + 0.5f;
 
-            int height = static_cast<int>(baseHeight + n * amplitude);
+            // Create distinct biome regions
+            float mountainMask = std::clamp((biomeNoise - 0.6f) * 3.0f, 0.0f, 1.0f);  // Mountains
+            float valleyMask = std::clamp((0.35f - biomeNoise) * 3.0f, 0.0f, 1.0f);    // Valleys
+            float hillMask = 1.0f - mountainMask - valleyMask;                          // Rolling hills
 
-            // Fill column (use PADDED_HEIGHT for Y dimension)
+            // ================================================================
+            // Mountain terrain - dramatic peaks with ridges
+            // ================================================================
+            const float mtScale = 0.002f;
+            glm::vec2 mtPos(warpedX * mtScale, warpedZ * mtScale);
+
+            // Ridged noise for mountain peaks (1 - abs creates ridges)
+            float ridge1 = 1.0f - std::abs(glm::simplex(mtPos * 0.7f));
+            float ridge2 = 1.0f - std::abs(glm::simplex(mtPos * 1.3f + glm::vec2(50.0f)));
+            float ridge3 = 1.0f - std::abs(glm::simplex(mtPos * 2.5f + glm::vec2(100.0f)));
+
+            // Sharpen ridges
+            ridge1 = ridge1 * ridge1;
+            ridge2 = ridge2 * ridge2;
+            ridge3 = ridge3 * ridge3;
+
+            // Combine with decreasing weight
+            float mountainHeight = ridge1 * 0.6f + ridge2 * 0.3f + ridge3 * 0.15f;
+            mountainHeight = std::pow(mountainHeight, 1.5f);  // Extra sharpness
+            mountainHeight = seaLevel + mountainHeight * (mountainPeak - seaLevel);
+
+            // ================================================================
+            // Valley terrain - erosion patterns, riverbeds
+            // ================================================================
+            const float valScale = 0.0015f;
+            glm::vec2 valPos(warpedX * valScale, warpedZ * valScale);
+
+            // Inverted ridge noise creates valley channels
+            float valleyRidge = std::abs(glm::simplex(valPos * 0.5f));
+            float valleyRidge2 = std::abs(glm::simplex(valPos * 1.2f + glm::vec2(30.0f)));
+
+            // Combine valley channels
+            float valleyChannel = std::min(valleyRidge, valleyRidge2);
+            valleyChannel = std::pow(valleyChannel, 0.7f);  // Soften valley bottoms
+
+            // Add some variation
+            float valleyVariation = glm::simplex(valPos * 3.0f) * 0.15f;
+            float valleyHeight = valleyFloor + valleyChannel * (seaLevel - valleyFloor) + valleyVariation * 10.0f;
+
+            // ================================================================
+            // Rolling hills - gentle undulations
+            // ================================================================
+            const float hillScale = 0.003f;
+            glm::vec2 hillPos(warpedX * hillScale, warpedZ * hillScale);
+
+            // Multi-octave for rolling hills
+            float hills = glm::simplex(hillPos * 0.3f) * 1.0f;
+            hills += glm::simplex(hillPos * 0.7f) * 0.5f;
+            hills += glm::simplex(hillPos * 1.5f) * 0.25f;
+            hills += glm::simplex(hillPos * 3.0f) * 0.125f;
+
+            // Normalize
+            hills = hills / (1.0f + 0.5f + 0.25f + 0.125f);
+            hills = hills * 0.5f + 0.5f;  // 0-1 range
+
+            float hillTerrainHeight = seaLevel + hills * (hillHeight - seaLevel);
+
+            // ================================================================
+            // Blend biomes together
+            // ================================================================
+            float height = mountainHeight * mountainMask
+                         + valleyHeight * valleyMask
+                         + hillTerrainHeight * hillMask;
+
+            // Add micro-detail across all biomes
+            const float detailScale = 0.008f;
+            glm::vec2 detailPos(wx * detailScale, wz * detailScale);
+            float detail = glm::simplex(detailPos) * 3.0f;
+            height += detail;
+
+            // Clamp to valid range
+            height = std::clamp(height, 1.0f, static_cast<float>(PADDED_HEIGHT - CHUNK_BORDER - 1));
+            int heightInt = static_cast<int>(height);
+
+            // ================================================================
+            // Fill column with appropriate materials
+            // ================================================================
             for (int ly = 0; ly < PADDED_HEIGHT; ++ly) {
                 int worldY = ly - CHUNK_BORDER;
 
                 uint8_t block = 0;  // Air
-                if (worldY < height - 3) {
-                    block = 1;  // Stone
-                } else if (worldY < height - 1) {
-                    block = 2;  // Dirt
-                } else if (worldY < height) {
-                    block = 3;  // Grass
+
+                if (worldY < heightInt) {
+                    // Determine block type based on depth and biome
+                    int depthFromSurface = heightInt - worldY;
+
+                    if (mountainMask > 0.5f && heightInt > 100) {
+                        // High mountain - snow/stone
+                        if (depthFromSurface < 2 && heightInt > 120) {
+                            block = 4;  // Snow/sand (white appearance)
+                        } else {
+                            block = 1;  // Stone all the way
+                        }
+                    } else if (valleyMask > 0.5f && heightInt < 15) {
+                        // Valley floor - sand/gravel
+                        if (depthFromSurface < 3) {
+                            block = 4;  // Sand
+                        } else {
+                            block = 1;  // Stone
+                        }
+                    } else {
+                        // Normal terrain layering
+                        if (depthFromSurface >= 5) {
+                            block = 1;  // Stone (deep)
+                        } else if (depthFromSurface >= 2) {
+                            block = 2;  // Dirt
+                        } else {
+                            block = 3;  // Grass (surface)
+                        }
+                    }
                 }
 
                 // Index: z varies fastest (stride 1), then y (stride PADDED_SIZE),
                 // then x (stride PADDED_HEIGHT*PADDED_SIZE)
                 int idx = lx * PADDED_HEIGHT * PADDED_SIZE + ly * PADDED_SIZE + lz;
                 voxelData[idx] = block;
+                // Lighting: solid=0 (occluded), air=63 (lit) - stb averages for AO
+                // Corners surrounded by solid get low values (dark), open faces get high (bright)
+                lightingData[idx] = (block != 0) ? 0 : 63;
             }
         }
     }

@@ -8,7 +8,10 @@
 #include "render_globals.h"
 #include "ibl_resources.h"
 #include "resources_shadow.h"
+#include "resources_gbuffer.h"
 #include "pipeline_shadow.h"
+#include "pipeline_gbuffer.h"
+#include "pipeline_deferred.h"
 #include "application_features.h"
 #include "render_features.h"
 #include "pbr_push_constants.h"
@@ -22,8 +25,22 @@
 #include <memory>
 #include <unordered_map>
 
+// Forward declare SDL types
+struct SDL_Window;
+
 namespace jupiter {
 namespace rendering {
+
+struct RenderSettings {
+    bool iblEnabled = true;
+    bool shadowsEnabled = true;
+    bool ssaoEnabled = false;
+    float exposure = 1.0f;
+    float ambientIntensity = 0.3f;
+    float lightFalloff = 2.0f;
+    float albedoMultiplier = 1.0f;
+    float maxReflectionLodClamp = -1.0f; // <0 uses texture mip count
+};
 
 // Forward declarations
 class VulkanMesh;
@@ -459,15 +476,59 @@ protected:
     void setAmbientLight(const float color[3], float intensity = 1.0f);
 
     /**
-     * @brief Enable/disable shadow mapping
-     * @param enabled true to enable shadows
+     * @brief Set PBR debug flags (for shader debugging)
+     *
+     * @param flags Bit flags from PBRPushConstants::FLAG_*
      */
-    void setShadowsEnabled(bool enabled) { shadowsEnabled_ = enabled; }
-    
+    void setPBRDebugFlags(uint32_t flags);
+
+    /**
+     * @brief Get current PBR debug flags
+     * @return Current flags value
+     */
+    uint32_t getPBRDebugFlags() const { return pbrDebugFlags_; }
+
     /**
      * @brief Check if shadows are enabled
      */
     bool areShadowsEnabled() const { return shadowsEnabled_; }
+
+    // ========================================================================
+    // Deferred Rendering Mode
+    // ========================================================================
+
+    /**
+     * @brief Enable deferred rendering mode
+     * 
+     * When enabled, the scene is rendered using a deferred rendering pipeline:
+     * 1. G-buffer pass: Renders geometry to multiple render targets
+     * 2. SSAO pass (if enabled): Computes ambient occlusion
+     * 3. Lighting pass: Computes lighting from G-buffer data
+     * 
+     * Deferred rendering is more efficient for scenes with many lights
+     * but uses more memory for G-buffer storage.
+     * 
+     * Call this in onInit() before loading models.
+     * 
+     * @param enable true to enable deferred rendering, false for forward
+     * @return true if successfully enabled
+     */
+    bool enableDeferredRendering(bool enable);
+
+    /**
+     * @brief Check if deferred rendering is enabled
+     */
+    bool isDeferredRenderingEnabled() const { return useDeferredRendering_; }
+
+    /**
+     * @brief Get G-buffer resources (for advanced usage)
+     */
+    ResourcesGBuffer* getGBufferResources() { return gBufferResources_.get(); }
+
+    /**
+     * @brief Get deferred pipeline (for advanced usage)
+     */
+    PipelineDeferred* getDeferredPipeline() { return deferredPipeline_.get(); }
 
     // ========================================================================
     // HDR Pipeline and Tonemapping
@@ -504,6 +565,24 @@ protected:
      * @brief Get current exposure value
      */
     float getExposure() const { return manualExposure_; }
+    
+    /**
+     * @brief Set max reflection LOD for IBL prefiltered map sampling
+     * @param lod Max mip level (typically 4-8 depending on cubemap size)
+     */
+    void setMaxReflectionLod(float lod);
+    
+    /**
+     * @brief Set light falloff exponent
+     * @param falloff Attenuation power (lower = slower falloff, default 1.0)
+     */
+    void setLightFalloff(float falloff);
+    
+    /**
+     * @brief Set albedo multiplier (adds ambient to prevent pure black)
+     * @param multiplier Albedo boost (0.0 = disabled, 0.01 typical for dark scenes)
+     */
+    void setAlbedoMultiplier(float multiplier);
 
     /**
      * @brief Enable/disable auto-exposure
@@ -565,6 +644,16 @@ protected:
     PBRPushConstants& getPBRParamsMutable() { return pbrPushConstants_; }
 
     /**
+     * @brief Get/Set render settings (runtime feature toggles)
+     */
+    const RenderSettings& getRenderSettings() const { return renderSettings_; }
+    RenderSettings& getRenderSettingsMutable() { return renderSettings_; }
+    void applyRenderSettings(const RenderSettings& settings);
+    void setIBLEnabled(bool enabled);
+    void setShadowsEnabled(bool enabled);
+    void setSSAOEnabled(bool enabled);
+
+    /**
      * @brief Set direct light intensity multiplier
      * @param intensity Value to multiply all direct lights by
      */
@@ -575,6 +664,17 @@ protected:
      * @param intensity Value to multiply ambient contribution by
      */
     void setAmbientIntensity(float intensity);
+    
+    /**
+     * @brief Load IBL environment from HDR file
+     * 
+     * Generates environment cubemap, irradiance map, prefiltered map,
+     * and optionally enables skybox rendering.
+     * 
+     * @param hdrFilePath Path to HDR equirectangular environment map
+     * @return true if successful
+     */
+    bool loadIBLFromHDR(const std::string& hdrFilePath);
 
     /**
      * @brief Set shadow intensity (0 = no shadows, 1 = full shadows)
@@ -613,6 +713,13 @@ protected:
      * Direct access to light manager for manual light control.
      */
     LightManager* getLightManager() { return lightManager_.get(); }
+
+    /**
+     * @brief Get material system (for advanced usage)
+     *
+     * Direct access to material system for custom material creation.
+     */
+    MaterialSystem* getMaterialSystem() { return materialSystem_.get(); }
 
     /**
      * @brief Request the application to close
@@ -666,6 +773,41 @@ protected:
      * @brief Get the Vulkan renderer for custom pipeline creation
      */
     vulkan::VulkanRenderer* getRenderer() { return renderer_.get(); }
+    
+    /**
+     * @brief Get the SDL window handle for ImGui/custom rendering
+     */
+    SDL_Window* getWindow();
+    
+    /**
+     * @brief Get Vulkan device (for custom pipeline/resource creation)
+     */
+    VkDevice getVulkanDevice();
+    
+    /**
+     * @brief Get Vulkan physical device (for custom pipeline/resource creation)
+     */
+    VkPhysicalDevice getVulkanPhysicalDevice();
+    
+    /**
+     * @brief Get VMA allocator (for custom resource creation)
+     */
+    VmaAllocator getVulkanAllocator();
+    
+    /**
+     * @brief Get command pool (for custom command buffer allocation)
+     */
+    VkCommandPool getVulkanCommandPool();
+    
+    /**
+     * @brief Get graphics queue (for custom command submission)
+     */
+    VkQueue getVulkanGraphicsQueue();
+    
+    /**
+     * @brief Get render pass (for custom pipeline creation)
+     */
+    VkRenderPass getVulkanRenderPass();
 
     /**
      * @brief Get current frame index (for per-frame resources)
@@ -704,6 +846,12 @@ private:
     std::unique_ptr<PipelineShadow> shadowPipeline_;
     bool shadowsEnabled_ = true;
 
+    // Deferred rendering systems
+    std::unique_ptr<ResourcesGBuffer> gBufferResources_;
+    std::unique_ptr<PipelineGBuffer> gBufferPipeline_;
+    std::unique_ptr<PipelineDeferred> deferredPipeline_;
+    bool useDeferredRendering_ = false;
+
     // HDR pipeline and tonemapping
     std::unique_ptr<ApplicationFeatures> appFeatures_;
     bool useHDRPipeline_ = false;
@@ -713,6 +861,8 @@ private:
 
     // PBR push constants for runtime tuning
     PBRPushConstants pbrPushConstants_;
+    uint32_t pbrDebugFlags_ = 0;  // Debug flags for shader debugging
+    RenderSettings renderSettings_{};
 
     // Loaded textures (image UUID -> VulkanTexture)
     std::unordered_map<std::string, std::unique_ptr<VulkanTexture>> textures_;
@@ -752,6 +902,11 @@ private:
     bool initializeHDRPipeline();
     void renderWithHDR(uint32_t frameIndex);
     void renderTonemapPass(VkCommandBuffer cmd, uint32_t frameIndex);
+
+    // Deferred rendering helpers
+    bool initializeDeferredRendering();
+    void renderDeferredPass(uint32_t frameIndex);
+    void renderGBufferPass(VkCommandBuffer cmd, uint32_t frameIndex);
 };
 
 } // namespace rendering

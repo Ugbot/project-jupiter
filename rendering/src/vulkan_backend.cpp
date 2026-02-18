@@ -1209,6 +1209,8 @@ bool VulkanContext::createAllocator() {
 // ============================================================================
 
 bool VulkanRenderer::initialize(const Window& window, bool enableValidation) {
+    window_ = &window;  // Store for swapchain recreation
+
     if (!context_.initialize(window, enableValidation)) {
         return false;
     }
@@ -1313,19 +1315,98 @@ void VulkanRenderer::waitIdle() {
     }
 }
 
+bool VulkanRenderer::isMinimized() const {
+    if (!window_) return false;
+    return window_->getWidth() == 0 || window_->getHeight() == 0;
+}
+
+void VulkanRenderer::destroyFramebuffers() {
+    for (auto framebuffer : framebuffers_) {
+        if (framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(context_.getDevice(), framebuffer, nullptr);
+        }
+    }
+    framebuffers_.clear();
+}
+
+void VulkanRenderer::cleanupSwapchain() {
+    // Wait for GPU to finish before cleanup
+    vkDeviceWaitIdle(context_.getDevice());
+
+    // Destroy framebuffers (they reference swapchain image views)
+    destroyFramebuffers();
+
+    // Destroy depth resources (size-dependent)
+    destroyDepthResources();
+
+    // Swapchain will be destroyed by create() with oldSwapchain param
+}
+
+void VulkanRenderer::recreateSwapchain() {
+    if (!window_) {
+        LOG_ERROR("Vulkan", "Cannot recreate swapchain: no window reference");
+        return;
+    }
+
+    // Check if window is minimized - if so, skip recreation
+    // The main loop will continue calling beginFrame which will retry
+    int width = window_->getWidth();
+    int height = window_->getHeight();
+    if (width == 0 || height == 0) {
+        LOG_DEBUG("Vulkan", "Window minimized, skipping swapchain recreation");
+        return;
+    }
+
+    // Clean up old swapchain resources
+    cleanupSwapchain();
+
+    // Store old swapchain for efficient recreation
+    VkSwapchainKHR oldSwapchain = swapchain_.getSwapchain();
+
+    // Create new swapchain
+    if (!swapchain_.create(context_.getDevice(), context_.getPhysicalDevice(),
+                          context_.getSurface(), width, height, oldSwapchain)) {
+        LOG_ERROR("Vulkan", "Failed to recreate swapchain");
+        return;
+    }
+
+    // Recreate depth resources for new size
+    if (!createDepthResources()) {
+        LOG_ERROR("Vulkan", "Failed to recreate depth resources");
+        return;
+    }
+
+    // Recreate framebuffers for new swapchain images
+    if (!createFramebuffers()) {
+        LOG_ERROR("Vulkan", "Failed to recreate framebuffers");
+        return;
+    }
+
+    LOG_INFO("Vulkan", "Swapchain recreated (%dx%d)", width, height);
+    framebufferResized_ = false;
+}
+
 bool VulkanRenderer::beginFrame(uint32_t& imageIndex) {
+    // Wait for previous frame using this slot to finish
     vkWaitForFences(context_.getDevice(), 1, &inFlightFences_[currentFrame_],
                    VK_TRUE, UINT64_MAX);
-    vkResetFences(context_.getDevice(), 1, &inFlightFences_[currentFrame_]);
 
+    // Acquire next swapchain image
     VkResult result = vkAcquireNextImageKHR(
         context_.getDevice(), swapchain_.getSwapchain(), UINT64_MAX,
         imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &imageIndex);
 
-    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-        LOG_ERROR("Vulkan", "Failed to acquire swapchain image");
+    // Handle swapchain out-of-date (window resize, minimize, etc.)
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreateSwapchain();
+        return false;  // Skip this frame, try again next iteration
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        LOG_ERROR("Vulkan", "Failed to acquire swapchain image (result=%d)", result);
         return false;
     }
+
+    // Only reset fence AFTER we know we're going to submit work
+    vkResetFences(context_.getDevice(), 1, &inFlightFences_[currentFrame_]);
 
     vkResetCommandBuffer(commandBuffers_[currentFrame_], 0);
 
@@ -1377,7 +1458,15 @@ void VulkanRenderer::endFrame(uint32_t imageIndex) {
     presentInfo.pSwapchains = swapchains;
     presentInfo.pImageIndices = &imageIndex;
 
-    vkQueuePresentKHR(context_.getPresentQueue(), &presentInfo);
+    VkResult result = vkQueuePresentKHR(context_.getPresentQueue(), &presentInfo);
+
+    // Handle swapchain out-of-date or suboptimal (window resize, etc.)
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized_) {
+        framebufferResized_ = false;
+        recreateSwapchain();
+    } else if (result != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "Failed to present swapchain image (result=%d)", result);
+    }
 
     currentFrame_ = (currentFrame_ + 1) % MAX_FRAMES_IN_FLIGHT;
 }
@@ -1391,7 +1480,7 @@ void VulkanRenderer::beginRenderPass(uint32_t imageIndex) {
     renderPassInfo.renderArea.extent = swapchain_.getExtent();
 
     VkClearValue clearValues[2] = {};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    clearValues[0].color = {{0.5f, 0.7f, 0.9f, 1.0f}};  // Sky blue
     clearValues[1].depthStencil = {1.0f, 0};
 
     renderPassInfo.clearValueCount = 2;
@@ -1406,13 +1495,25 @@ void VulkanRenderer::endRenderPass() {
 }
 
 void VulkanRenderer::bindPipeline() {
+    VkPipeline pipeline = pipeline_.getPipeline();
+    printf("[VULKAN BIND] Pipeline: %p, CMD: %p\n", (void*)pipeline, (void*)commandBuffers_[currentFrame_]);
+    fflush(stdout);
+    if (pipeline == VK_NULL_HANDLE) {
+        printf("[VULKAN ERROR] NULL PIPELINE!\n");
+        fflush(stdout);
+        return;
+    }
     vkCmdBindPipeline(commandBuffers_[currentFrame_],
-                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_.getPipeline());
+                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 }
 
 void VulkanRenderer::drawIndexed(const VulkanBuffer& vertexBuffer,
-                                 const VulkanBuffer& indexBuffer,
-                                 uint32_t indexCount) {
+                                  const VulkanBuffer& indexBuffer,
+                                  uint32_t indexCount) {
+    printf("[VULKAN DRAW] vBuf=%p, iBuf=%p, count=%u\n",
+           (void*)vertexBuffer.getBuffer(), (void*)indexBuffer.getBuffer(), indexCount);
+    fflush(stdout);
+    
     VkBuffer vertexBuffers[] = {vertexBuffer.getBuffer()};
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(commandBuffers_[currentFrame_], 0, 1, vertexBuffers, offsets);

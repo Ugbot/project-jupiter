@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <glm/vec3.hpp>
+#include "voxel_types.h"
 
 /**
  * @file vis_bounds.h
@@ -117,13 +118,13 @@ inline float minDistToBounds(float x, float z, const VisBounds& bounds) {
 /**
  * @brief Compute scale vector for rendering a chunk at given bounds
  *
- * The same 32x32 voxel grid is stretched to cover the bounds.
+ * The voxel grid is stretched to cover the bounds.
  *
  * @param bounds World bounds
- * @param chunkSize Voxel resolution (32)
+ * @param chunkSize Voxel resolution (default CHUNK_SIZE=16)
  * @return Scale vector (x, 1, z) - Y scale is always 1
  */
-inline glm::vec3 computeScale(const VisBounds& bounds, int chunkSize = 32) {
+inline glm::vec3 computeScale(const VisBounds& bounds, int chunkSize = CHUNK_SIZE) {
     return glm::vec3(
         static_cast<float>(bounds.x1 - bounds.x0) / chunkSize,
         1.0f,  // Y (height) doesn't scale with LOD

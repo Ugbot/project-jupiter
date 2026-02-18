@@ -53,24 +53,24 @@ layout(set = 0, binding = 2) uniform samplerCube irradianceMap;
 layout(set = 0, binding = 3) uniform samplerCube prefilteredMap;
 layout(set = 0, binding = 4) uniform sampler2D brdfLUT;
 
+// Set 0 (continued): Shadow/SSAO (bindings 5-7 in RenderGlobals)
+layout(set = 0, binding = 5) uniform sampler2DShadow shadowMap;
+layout(set = 0, binding = 6) uniform sampler2D ssaoMap;
+layout(set = 0, binding = 7) uniform ShadowEffectsUBO {
+    mat4 lightSpaceMatrix;
+    vec4 shadowParams;  // x=minBias, y=maxBias
+    int shadowEnabled;
+    int ssaoEnabled;
+    float ssaoIntensity;
+    int _padding0;
+} shadowEffects;
+
 // Set 1: Material textures
 layout(set = 1, binding = 0) uniform sampler2D albedoMap;
 layout(set = 1, binding = 1) uniform sampler2D normalMap;
 layout(set = 1, binding = 2) uniform sampler2D metallicRoughnessMap;
 layout(set = 1, binding = 3) uniform sampler2D occlusionMap;
 layout(set = 1, binding = 4) uniform sampler2D emissiveMap;
-
-// Set 2: Shadow/SSAO (optional)
-layout(set = 2, binding = 0) uniform sampler2DShadow shadowMap;
-layout(set = 2, binding = 1) uniform sampler2D ssaoMap;
-layout(set = 2, binding = 2) uniform ShadowUBO {
-    mat4 lightSpaceMatrix;
-    vec4 lightPosition;
-    float shadowMinBias;
-    float shadowMaxBias;
-    float shadowNearPlane;
-    float shadowFarPlane;
-} shadow;
 
 // Push constants for runtime tuning
 layout(push_constant) uniform PushConstants {
@@ -106,7 +106,7 @@ layout(location = 0) out vec4 outColor;
 
 float calculateShadowBias(vec3 normal, vec3 lightDir) {
     float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
-    return max(shadow.shadowMaxBias * (1.0 - cosTheta), shadow.shadowMinBias);
+    return max(shadowEffects.shadowParams.y * (1.0 - cosTheta), shadowEffects.shadowParams.x);
 }
 
 float shadowPCF(vec4 shadowCoord, float bias) {
@@ -131,13 +131,14 @@ float shadowPCF(vec4 shadowCoord, float bias) {
 }
 
 float getShadowFactor(vec3 worldPos, vec3 normal) {
-    if (SHADOW_ENABLED == 0) return 1.0;
+    if (shadowEffects.shadowEnabled == 0) return 1.0;
 
-    vec4 shadowCoord = shadow.lightSpaceMatrix * vec4(worldPos, 1.0);
+    vec4 shadowCoord = shadowEffects.lightSpaceMatrix * vec4(worldPos, 1.0);
     shadowCoord.xyz /= shadowCoord.w;
     shadowCoord.xy = shadowCoord.xy * 0.5 + 0.5;
 
-    vec3 lightDir = normalize(shadow.lightPosition.xyz - worldPos);
+    // Use first directional light as shadow caster
+    vec3 lightDir = normalize(-lights.lightPositions[0].xyz);
     float bias = calculateShadowBias(normal, lightDir);
 
     float shadowFactor = shadowPCF(shadowCoord, bias);

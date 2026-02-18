@@ -18,10 +18,12 @@
 #include "rendering/application_advanced.h"
 #include "rendering/application_features.h"
 #include "rendering/scene_manager.h"
+#include "rendering/pbr_push_constants.h"
 #include "input/input.h"
 #include "ecs/ecs.h"
 #include "logging/logging.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <SDL3/SDL.h>
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -89,13 +91,13 @@ public:
         if (input.isActionHeld(Action::MoveBackward)) position_ -= forward * velocity;
         if (input.isActionHeld(Action::MoveLeft)) position_ -= right * velocity;
         if (input.isActionHeld(Action::MoveRight)) position_ += right * velocity;
-        if (input.isActionHeld(Action::MoveUp)) position_.y -= velocity;    // Up (inverted Y)
-        if (input.isActionHeld(Action::MoveDown)) position_.y += velocity;  // Down (inverted Y)
+        if (input.isActionHeld(Action::MoveUp)) position_.y += velocity;    // Up
+        if (input.isActionHeld(Action::MoveDown)) position_.y -= velocity;  // Down
     }
 
     void processMouse(float xoffset, float yoffset) {
-        yaw_ += xoffset * mouseSensitivity_;
-        pitch_ -= yoffset * mouseSensitivity_;
+        yaw_ -= xoffset * mouseSensitivity_;    // Invert X
+        pitch_ -= yoffset * mouseSensitivity_;  // Invert Y
 
         // Clamp pitch to avoid gimbal lock
         if (pitch_ > glm::radians(89.0f)) pitch_ = glm::radians(89.0f);
@@ -130,19 +132,19 @@ protected:
         // Initialize input system
         initializeInput();
         
-        // Set up camera for Sponza (large scene needs wide clip range)
+        // Set up camera for Sponza (matches HelloVulkan reference: near=0.1, far=100)
         auto* camera = createPerspectiveCamera(
-            glm::radians(70.0f),  // Wider FOV for FPS feel
-            0.0f,                  // Auto aspect
-            0.01f,                 // Near (very close for details)
-            2000.0f                // Far (Sponza is ~30m, but allow for exploration)
+            glm::radians(45.0f),   // Standard FOV (matches reference)
+            0.0f,                   // Auto aspect
+            0.1f,                   // Near
+            100.0f                  // Far (matches reference)
         );
         setActiveCamera(camera);
 
-        // Initialize fly camera
-        flyCamera_.setPosition({0.0f, -3.0f, 0.0f});
-        flyCamera_.setYawPitch(glm::radians(90.0f), 0.0f);  // Looking down +X
-        flyCamera_.setMoveSpeed(10.0f);
+        // Initialize fly camera - position like HelloVulkan: (0, 1, 6) looking at (0, 2.5, 0)
+        flyCamera_.setPosition({0.0f, 1.0f, 6.0f});
+        flyCamera_.setYawPitch(glm::radians(-90.0f), glm::radians(15.0f));  // Looking towards center
+        flyCamera_.setMoveSpeed(2.5f);  // Slower movement for smaller scale
 
         // Enable auto-render for PBR models
         enableAutoRender();
@@ -162,32 +164,51 @@ protected:
         if (!modelHandles_.empty()) {
             std::cout << "Loaded scene with " << modelHandles_.size() << " renderables\n";
             
-            // Apply rotation to flip model right-side up
-            glm::mat4 flipTransform = glm::mat4(1.0f);
-            flipTransform = glm::rotate(flipTransform, glm::radians(180.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            // Scale model down to fit camera frustum (Sponza is ~30m, we want ~3m)
+            glm::mat4 scaleTransform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
             
             SceneManager* scene = getSceneManager();
             for (auto& handle : modelHandles_) {
-                scene->updateTransform(handle, flipTransform);
+                scene->updateTransform(handle, scaleTransform);
             }
         } else {
             std::cerr << "ERROR: Could not load any model!\n";
         }
 
-        // Set up main directional light (strong sun for large scene)
-        sunDirection_ = glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f));
+        // Set up main directional light (matches lighting_demo)
+        sunDirection_ = glm::normalize(glm::vec3(-0.5f, -1.0f, -0.5f));
         addDirectionalLight(
             (float[]){sunDirection_.x, sunDirection_.y, sunDirection_.z},
-            (float[]){1.0f, 0.98f, 0.9f},
-            8.0f  // Increased for large scene
+            (float[]){1.0f, 1.0f, 1.0f},
+            8.0f  // Same as lighting_demo
         );
 
-        // Higher ambient for large indoor scene
-        setAmbientLight((float[]){0.15f, 0.14f, 0.18f}, 1.0f);
+        // Ambient light (matches lighting_demo)
+        setAmbientLight((float[]){0.3f, 0.3f, 0.35f}, 1.5f);
 
-        // Create scene lights
-        createSceneLights();
+        // Add point lights like lighting_demo (scaled for 0.01 model scale)
+        float pointPos1[3] = {0.02f, 0.02f, 0.02f};  // Scaled from {2, 2, 2}
+        float lightColor1[3] = {1.0f, 0.9f, 0.8f};
+        addPointLight(pointPos1, lightColor1, 15.0f, 0.1f);  // Scaled radius
 
+        float pointPos2[3] = {-0.02f, 0.01f, 0.01f};  // Scaled from {-2, 1, 1}
+        float lightColor2[3] = {0.3f, 0.5f, 1.0f};
+        addPointLight(pointPos2, lightColor2, 8.0f, 0.1f);
+
+        // IBL Setup - using fallback gray environment
+        // Full HDR IBL pipeline needs further debugging (causes VK_ERROR_DEVICE_LOST on Apple M3)
+        // Compared with HelloVulkan: render pass structure matches, but MRT rendering still fails
+        // TODO: Try RenderDoc capture to identify exact failure point
+        std::cout << "\n=== IBL Setup ===\n";
+        std::cout << "Using computed BRDF LUT with fallback environment\n";
+        
+        // Set PBR parameters
+        setAmbientIntensity(1.0f);        // IBL ambient contribution
+        setExposure(1.0f);                // Manual exposure
+        setMaxReflectionLod(4.0f);        // IBL mipmap levels
+        setLightFalloff(1.0f);            // Light attenuation power
+        setAlbedoMultiplier(0.01f);       // Slight ambient to prevent pure black
+        
         // Initialize advanced features
         initializeAdvancedFeatures();
 
@@ -250,14 +271,14 @@ protected:
         features.ssaoConfig().bias = 0.025f;
         features.ssaoConfig().intensity = 1.5f;
         
-        // Enable HDR tonemapping (shadow/SSAO still disabled until descriptor fix)
+        // Disable all advanced features by default until fully debugged
         // features.enable(RenderFeature::ShadowMapping);
         // features.enable(RenderFeature::SSAO);
-        features.enable(RenderFeature::Tonemap);
+        // features.enable(RenderFeature::Tonemap);
         
         shadowsEnabled_ = false;
         ssaoEnabled_ = false;
-        hdrEnabled_ = true;
+        hdrEnabled_ = false;
         skyboxEnabled_ = false;
         
         std::cout << "  [X] Shadow Mapping (2048x2048, PCF)\n";
@@ -269,6 +290,14 @@ protected:
         glm::vec3 lightPos = sunDirection_ * 50.0f;  // Position far away in sun direction
         glm::vec3 target(0.0f, 0.0f, 0.0f);          // Scene center
         updateShadowLight(lightPos, -sunDirection_, target);
+        
+        // Set up PBR parameters from HelloVulkan for best results
+        // These can be tuned in real-time with the debug controls
+        setAmbientIntensity(1.0f);        // IBL ambient contribution
+        setExposure(1.0f);                // Manual exposure
+        setMaxReflectionLod(4.0f);        // IBL mipmap levels
+        setLightFalloff(1.0f);            // Light attenuation power
+        setAlbedoMultiplier(0.01f);       // Slight ambient to prevent pure black (from HelloVulkan)
     }
 
     void printControls() {
@@ -319,6 +348,9 @@ protected:
         // Handle discrete actions (pressed this frame)
         processActions();
         
+        // Handle PBR debug keys via direct SDL polling
+        handleDebugKeys();
+        
         // Handle continuous movement
         if (mouseCaptured_ && !orbitMode_) {
             flyCamera_.processInput(input, deltaTime);
@@ -328,6 +360,134 @@ protected:
             input.getMouseDelta(mouseDx, mouseDy);
             flyCamera_.processMouse(mouseDx, mouseDy);
         }
+    }
+    
+    void handleDebugKeys() {
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+        static bool lastKeys[SDL_SCANCODE_COUNT] = {false};
+        
+        // Track toggle states separately from debug view modes
+        static uint32_t toggleFlags = 0;  // T, I, N, L toggles
+        static uint32_t debugViewFlag = 0; // F1-F10 debug view mode
+        
+        auto checkKey = [&](SDL_Scancode sc) -> bool {
+            bool pressed = keys[sc] && !lastKeys[sc];
+            lastKeys[sc] = keys[sc];
+            return pressed;
+        };
+        
+        bool changed = false;
+        
+        // Debug view modes (F1-F10) - these are mutually exclusive
+        if (checkKey(SDL_SCANCODE_KP_0) || checkKey(SDL_SCANCODE_GRAVE)) {
+            debugViewFlag = 0;
+            std::cout << "[DEBUG] Normal rendering\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F1)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_ALBEDO;
+            std::cout << "[DEBUG] Showing ALBEDO texture\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F2)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_NORMALS;
+            std::cout << "[DEBUG] Showing NORMALS\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F3)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_METALLIC;
+            std::cout << "[DEBUG] Showing METALLIC\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F4)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_ROUGHNESS;
+            std::cout << "[DEBUG] Showing ROUGHNESS\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F5)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_AO;
+            std::cout << "[DEBUG] Showing AO\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F6)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_DIFFUSE_ONLY;
+            std::cout << "[DEBUG] Showing DIFFUSE only\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F7)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_SPECULAR_ONLY;
+            std::cout << "[DEBUG] Showing SPECULAR only\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F8)) {
+            debugViewFlag = PBRPushConstants::FLAG_DEBUG_F0;
+            std::cout << "[DEBUG] Showing F0\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F9)) {
+            debugViewFlag = (1u << 16);  // Albedo * baseColorFactor
+            std::cout << "[DEBUG] Showing ALBEDO * baseColorFactor\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_F10)) {
+            debugViewFlag = (1u << 17);  // baseColorFactor UBO value
+            std::cout << "[DEBUG] Showing baseColorFactor UBO\n";
+            changed = true;
+        }
+        
+        // Toggle flags (T, I, N, L) - these persist across debug view changes
+        if (checkKey(SDL_SCANCODE_T)) {
+            toggleFlags ^= PBRPushConstants::FLAG_DISABLE_TONEMAPPING;
+            std::cout << "[DEBUG] Tonemapping: " << ((toggleFlags & PBRPushConstants::FLAG_DISABLE_TONEMAPPING) ? "OFF" : "ON") << "\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_I)) {
+            toggleFlags ^= PBRPushConstants::FLAG_DISABLE_IBL;
+            std::cout << "[DEBUG] IBL: " << ((toggleFlags & PBRPushConstants::FLAG_DISABLE_IBL) ? "OFF" : "ON") << "\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_N)) {
+            toggleFlags ^= PBRPushConstants::FLAG_DISABLE_NORMAL_MAPPING;
+            std::cout << "[DEBUG] Normal mapping: " << ((toggleFlags & PBRPushConstants::FLAG_DISABLE_NORMAL_MAPPING) ? "OFF" : "ON") << "\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_L)) {
+            toggleFlags ^= PBRPushConstants::FLAG_DISABLE_DIRECT_LIGHT;
+            std::cout << "[DEBUG] Direct light: " << ((toggleFlags & PBRPushConstants::FLAG_DISABLE_DIRECT_LIGHT) ? "OFF" : "ON") << "\n";
+            changed = true;
+        }
+        if (checkKey(SDL_SCANCODE_P)) {
+            printDebugHelp();
+        }
+        
+        // Combine toggle flags with debug view flag
+        if (changed) {
+            uint32_t finalFlags = toggleFlags | debugViewFlag;
+            setPBRDebugFlags(finalFlags);
+        }
+    }
+    
+    void printDebugHelp() {
+        std::cout << "\n========================================\n";
+        std::cout << "  PBR Debug Controls:\n";
+        std::cout << "========================================\n";
+        std::cout << "  ` or KP0 = Normal rendering\n";
+        std::cout << "  F1 = Albedo texture\n";
+        std::cout << "  F2 = Normals\n";
+        std::cout << "  F3 = Metallic\n";
+        std::cout << "  F4 = Roughness\n";
+        std::cout << "  F5 = Ambient Occlusion\n";
+        std::cout << "  F6 = Diffuse contribution only\n";
+        std::cout << "  F7 = Specular contribution only\n";
+        std::cout << "  F8 = F0 (reflectivity)\n";
+        std::cout << "  F9 = Albedo * baseColorFactor\n";
+        std::cout << "  F10 = baseColorFactor UBO value\n";
+        std::cout << "  T = Toggle tonemapping\n";
+        std::cout << "  I = Toggle IBL\n";
+        std::cout << "  N = Toggle normal mapping\n";
+        std::cout << "  L = Toggle direct lighting\n";
+        std::cout << "  P = Print this help\n";
+        std::cout << "========================================\n\n";
     }
 
     void processActions() {
@@ -353,8 +513,8 @@ protected:
         }
 
         if (input.isActionPressed(static_cast<Action>(DemoAction::ResetCamera))) {
-            flyCamera_.setPosition({0.0f, -3.0f, 0.0f});
-            flyCamera_.setYawPitch(glm::radians(90.0f), 0.0f);
+            flyCamera_.setPosition({0.0f, 1.0f, 6.0f});
+            flyCamera_.setYawPitch(glm::radians(-90.0f), glm::radians(15.0f));
             std::cout << "[CAMERA] Reset to start position\n";
         }
 

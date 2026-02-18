@@ -55,6 +55,22 @@ using ChunkUnloadCallback = std::function<void(
 )>;
 
 /**
+ * @brief Callback for raw stb_voxel_render mesh data
+ *
+ * Used by ChunkEntityBridge to directly receive 8-byte vertices
+ * for GPU upload without intermediate conversion.
+ */
+using RawMeshCallback = std::function<void(
+    const ChunkCoord& coord,
+    uint32_t poolIndex,
+    const void* stbVertices,       ///< Raw stb_voxel_render vertices (8 bytes each)
+    uint32_t vertexCount,
+    const glm::vec3& scale,        ///< Scale factor for position unpacking
+    const glm::vec3& aabbMin,
+    const glm::vec3& aabbMax
+)>;
+
+/**
  * @brief Raycast result for voxel intersection
  */
 struct VoxelRaycastResult {
@@ -120,6 +136,16 @@ public:
      */
     void setUnloadCallback(ChunkUnloadCallback callback) {
         unloadCallback_ = std::move(callback);
+    }
+
+    /**
+     * @brief Set callback for raw stb mesh data
+     *
+     * Used by ChunkEntityBridge for direct GPU upload.
+     * Called in addition to meshCallback_ when both are set.
+     */
+    void setRawMeshCallback(RawMeshCallback callback) {
+        rawMeshCallback_ = std::move(callback);
     }
 
     // ========================================================================
@@ -282,9 +308,13 @@ private:
     std::unique_ptr<VoxelVertex[]> convertedVertices_;
     static constexpr uint32_t MAX_CONVERTED_VERTICES = MeshBuffer::MAX_VERTICES;
 
+    // Raw stb vertex buffer for raw mesh callback (pre-allocated)
+    std::unique_ptr<StbVoxelVertex[]> rawStbVertices_;
+
     // Callbacks
     ChunkMeshCallback meshCallback_;
     ChunkUnloadCallback unloadCallback_;
+    RawMeshCallback rawMeshCallback_;
 
     // Per-frame stats
     uint32_t chunksMeshedThisFrame_ = 0;

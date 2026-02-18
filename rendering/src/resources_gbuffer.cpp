@@ -122,6 +122,9 @@ void ResourcesGBuffer::create(VkDevice device,
 
     createPositionTexture();
     createNormalTexture();
+    createAlbedoTexture();
+    createMaterialTexture();
+    createEmissiveTexture();
     createDepthTexture();
     createNoiseTexture();
     createSSAOTexture();
@@ -181,6 +184,9 @@ void ResourcesGBuffer::destroy() {
     // Destroy images
     destroyImage(device_, position_);
     destroyImage(device_, normal_);
+    destroyImage(device_, albedo_);
+    destroyImage(device_, material_);
+    destroyImage(device_, emissive_);
     destroyImage(device_, depth_);
     destroyImage(device_, noise_);
     destroyImage(device_, ssao_);
@@ -198,11 +204,17 @@ void ResourcesGBuffer::onWindowResized(uint32_t width, uint32_t height) {
 
     destroyImage(device_, position_);
     destroyImage(device_, normal_);
+    destroyImage(device_, albedo_);
+    destroyImage(device_, material_);
+    destroyImage(device_, emissive_);
     destroyImage(device_, depth_);
     destroyImage(device_, ssao_);
 
     createPositionTexture();
     createNormalTexture();
+    createAlbedoTexture();
+    createMaterialTexture();
+    createEmissiveTexture();
     createDepthTexture();
     createSSAOTexture();
     createGBufferFramebuffer();
@@ -225,6 +237,35 @@ void ResourcesGBuffer::createNormalTexture() {
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                 normal_);
     createImageView(device_, normal_, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void ResourcesGBuffer::createAlbedoTexture() {
+    // RGBA8_UNORM for albedo + metallic (A)
+    // NOTE: We store albedo in LINEAR space in the G-buffer.
+    // Our asset textures use UNORM (even for sRGB assets) and shaders do manual GammaToLinear.
+    createImage(device_, physicalDevice_, config_.width, config_.height,
+                VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                albedo_);
+    createImageView(device_, albedo_, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void ResourcesGBuffer::createMaterialTexture() {
+    // RGBA8_UNORM for roughness (R) + AO (G) + unused (B, A)
+    createImage(device_, physicalDevice_, config_.width, config_.height,
+                VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                material_);
+    createImageView(device_, material_, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void ResourcesGBuffer::createEmissiveTexture() {
+    // R16G16B16A16_SFLOAT for emissive (RGB) + unused (A)
+    createImage(device_, physicalDevice_, config_.width, config_.height,
+                VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                emissive_);
+    createImageView(device_, emissive_, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 void ResourcesGBuffer::createDepthTexture() {
@@ -333,9 +374,9 @@ void ResourcesGBuffer::createSamplers() {
 }
 
 void ResourcesGBuffer::createGBufferRenderPass() {
-    std::array<VkAttachmentDescription, 3> attachments{};
+    std::array<VkAttachmentDescription, 6> attachments{};
 
-    // Position attachment
+    // 0: Position attachment
     attachments[0].format = VK_FORMAT_R16G16B16A16_SFLOAT;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -345,7 +386,7 @@ void ResourcesGBuffer::createGBufferRenderPass() {
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    // Normal attachment
+    // 1: Normal attachment
     attachments[1].format = VK_FORMAT_R16G16B16A16_SFLOAT;
     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -355,22 +396,56 @@ void ResourcesGBuffer::createGBufferRenderPass() {
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[1].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    // Depth attachment
-    attachments[2].format = VK_FORMAT_D32_SFLOAT;
+    // 2: Albedo attachment
+    // Stored as LINEAR values (see createAlbedoTexture + gbuffer.frag)
+    attachments[2].format = VK_FORMAT_R8G8B8A8_UNORM;
     attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[2].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    attachments[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkAttachmentReference, 2> colorAttachmentRefs{};
+    // 3: Material attachment
+    attachments[3].format = VK_FORMAT_R8G8B8A8_UNORM;
+    attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[3].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    // 4: Emissive attachment
+    attachments[4].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    attachments[4].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[4].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[4].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    // 5: Depth attachment
+    attachments[5].format = VK_FORMAT_D32_SFLOAT;
+    attachments[5].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[5].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[5].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[5].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[5].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[5].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[5].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+    std::array<VkAttachmentReference, 5> colorAttachmentRefs{};
     colorAttachmentRefs[0] = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     colorAttachmentRefs[1] = {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    colorAttachmentRefs[2] = {2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    colorAttachmentRefs[3] = {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    colorAttachmentRefs[4] = {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 
     VkAttachmentReference depthAttachmentRef{};
-    depthAttachmentRef.attachment = 2;
+    depthAttachmentRef.attachment = 5;
     depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription subpass{};
@@ -402,9 +477,12 @@ void ResourcesGBuffer::createGBufferRenderPass() {
 }
 
 void ResourcesGBuffer::createGBufferFramebuffer() {
-    std::array<VkImageView, 3> attachments = {
+    std::array<VkImageView, 6> attachments = {
         position_.view,
         normal_.view,
+        albedo_.view,
+        material_.view,
+        emissive_.view,
         depth_.view
     };
 

@@ -14,6 +14,27 @@ add_library(jupiter_voxel STATIC
     src/voxel_mesh_converter.cpp
     src/voxel_physics_mesh.cpp
     src/voxel_world.cpp
+    # New kernel-based voxel system
+    src/csg_evaluator.cpp
+    src/face_culler.cpp
+    src/ao_calculator.cpp
+    src/greedy_mesher.cpp
+    src/vertex_encoder.cpp
+    src/voxel_kernels.cpp
+    src/voxel_world_v2.cpp
+    # Block registry and terrain rules
+    src/block_registry.cpp
+    src/terrain_rules.cpp
+    # Smooth terrain (Marching Cubes + Transvoxel)
+    src/transvoxel_tables.cpp
+    src/marching_cubes.cpp
+    src/transvoxel_mesher.cpp
+    src/smooth_mesh_kernel.cpp
+    
+    # Mesh optimization
+    src/mesh_optimizer.cpp
+    # Perlin noise terrain generation
+    src/perlin_terrain.cpp
 )
 
 target_include_directories(jupiter_voxel
@@ -61,6 +82,7 @@ target_link_libraries(jupiter_voxel
         Threads::Threads
     PRIVATE
         logging
+        meshoptimizer
 )
 
 # C++20 required

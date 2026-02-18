@@ -94,6 +94,13 @@ bool PipelineImGui::initialize(VkDevice device,
         return false;
     }
 
+    // Load Vulkan functions for ImGui (needed when VK_NO_PROTOTYPES is set)
+    auto loader = [](const char* function_name, void* user_data) -> PFN_vkVoidFunction {
+        VkInstance inst = static_cast<VkInstance>(user_data);
+        return vkGetInstanceProcAddr(inst, function_name);
+    };
+    ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_2, loader, instance);
+
     // Initialize Vulkan backend
     ImGui_ImplVulkan_InitInfo initInfo = {};
     initInfo.ApiVersion = VK_API_VERSION_1_2;
